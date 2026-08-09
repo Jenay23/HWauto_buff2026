@@ -59,6 +59,12 @@ enum class BuffMode : int {
     BIG_BUFF = 2,
 };
 
+// 检测模型使用的能量机关颜色编号。
+enum class BuffColor : int {
+    BLUE = 0,
+    RED = 1,
+};
+
 // 能量机关扇叶激活状态。
 enum class BuffActivation : int {
     NONE = -1,
