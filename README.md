@@ -21,6 +21,84 @@ RoboMaster 能量机关（Buff / 大符 / 小符）自动瞄准算法库。
 
 
 
+## 算法概述
+
+整个自瞄链路的数据流：
+
+```
+BGR图像
+  → Detector  （letterbox → TensorRT 推理 → 解码 + NMS + 9 关键点）
+  → Selector  （颜色/激活筛选 → PnP 求相机夹角 → 选夹角最小的扇叶）
+  → PnP       （IPPE 平面四点解算 + 双解歧义消解 → 相机系位姿 Pose3f）
+  → Tracker   （状态机 LOST/CONVERGING/TRACKING/TEMP_LOST → 运动模型跟踪）
+  → Predictor （按运动模型外推 → 输出未来打击点坐标）
+```
+
+### Detector 检测
+
+- 输入 `buff.onnx`（由 `trtexec` 转成 `buff.engine`），输出形状 `[1, 5040, 26]`：
+  每行是 `[cx, cy, w, h, 4 类得分, 9×(x, y)]`。
+- 类别映射：`b_inactive / b_active / r_inactive / r_active`（扇叶未激活/激活 × 蓝/红）。
+- 流程：letterbox 等比缩放填充 → TensorRT 推理 → 逐候选按类别最大得分过滤（`confidence_threshold`）
+  → 同类框做 NMS（`nms_threshold`）→ 关键点坐标还原到原图。
+- 9 个关键点中 0~7 是打击板八边形顶点，取相邻点中点生成 PnP 用的
+  `Top/Left/Bottom/Right` 四点；第 8 点是 R 中心，不参与单个扇叶 PnP。
+
+### Selector 目标筛选
+
+- 只保留"我方要打的那一色 + 未激活"的扇叶（蓝队打红符，红队打蓝符）。
+- 对每个候选用 IPPE 解一次位姿，按"相机光轴与扇叶中心的夹角"从小到大排序，
+  选夹角最小的一个作为瞄准目标，避免打在靠近画面边缘的扇叶上。
+
+### PnP 位姿解算
+
+- 用 `cv::solvePnPGeneric(..., SOLVEPNP_IPPE)` 对平面四点求两个镜像候选解。
+- 双解消歧：首帧选重投影误差更小的解；后续帧比较两个解与上一帧位姿的
+  "平移差 × 2 + 旋转角差"加权距离，选更连续的解，抑制解跳变。
+- 输出统一到相机系（前 x / 左 y / 上 z），可直接送入 tracker。
+
+### Tracker 跟踪
+
+- **跟踪状态机**：`LOST → CONVERGING → TRACKING`，跟丢时 `TRACKING → TEMP_LOST`
+  （超 `max_temp_lost_frames` 帧回 LOST）。大符 CONVERGING 超 `max_converging_frames`
+  帧兜底进 TRACKING。
+- **小符**：转速固定，用两个一维卡尔曼滤波（`KF<1>`）分别跟踪 roll 和 yaw，
+  R 中心用 EMA 平滑；roll 接近 ±90° 奇异区时强制置位滤波值。
+- **大符**：转速服从正弦 `v(t) = A·sin(ωt+φ) + C`。由相邻帧 roll 差分求瞬时速度，
+  过滤跳变/超速点后送入 RANSAC 正弦拟合；内点数达到 `min_inliers` 即认为拟合成功，
+  用模型平滑预测转速。RANSAC 参数见 `config/tracker/tracker.yaml`。
+
+  **RANSAC 拟合细节**（实现见 `src/tracker/ransac_filter.cpp`）：
+
+  模型要解的参数是 `(A, ω, φ, C)`，但 ω 出现在三角函数内部，无法直接线性求解。
+  做法是**固定 ω 再对剩下的线性参数做最小二乘**，而 ω 在合理区间内随机采样：
+
+  1. 数据源：每帧用 `roll_velocity = (roll_t - roll_{t-1}) / Δt` 求瞬时速度，
+     丢弃跳变（角差 > `switch_buff_angle`）、速度超过 `max_abs_speed`（2.09 rad/s）、
+     以及 roll 奇异处的点后，存入 `(相对时间 t, 速度 v)` 序列。
+  2. 若两个采样点时间间隔超过 5s，视为目标丢失/重开，清空数据重新开始。
+  3. 开始拟合前先保证数据量 ≥ 3 个点。
+  4. 迭代 `max_iterations = 200` 次，每次：
+     - 从 `[min_omega, max_omega]`（即 1.884 ~ 2.0 rad/s）按均匀分布**随机抽一个 ω**；
+     - 从数据中**随机取 3 个点**，构造线性方程组
+       `[sin(ωtᵢ), cos(ωtᵢ), 1] · [A₁, A₂, C]ᵀ = vᵢ`，用 SVD 最小二乘解得 `A₁, A₂, C`；
+     - 换算回极坐标 `A = √(A₁²+A₂²)`，`φ = atan2(A₂, A₁)`；
+     - 若 `A` 不在 `[min_amplitude, max_amplitude]`（0.78 ~ 1.045 rad/s）范围则丢弃该次候选；
+     - 用该候选模型对**全部数据**统计内点数：`|vᵢ − (A·sin(ωtᵢ+φ) + C)| < threshold`（0.5 rad/s）；
+     - 内点数超过当前最优则更新最优参数。
+  5. 迭代完成后，若最优模型的内点数 ≥ `min_inliers = 100`，`ransac_ready()` 返回真，
+     tracker 用该正弦模型平滑预测 roll 速度，并从 CONVERGING 进入 TRACKING。
+  6. 数据量超过 300 个点时弹出最旧的点，避免时间窗过长、模型漂移。
+
+  注：ω 是连续值，无法穷举，代码用的是 `[min_omega, max_omega]` 区间内
+  200 次均匀随机采样（每次配 3 个随机样本点），200 次中内点数最多的那组即最终模型。
+
+### Predictor 位置预测
+
+- 根据 tracker 输出的运动状态（小符的 `roll_velocity`，或大符的正弦参数 `A/ω/φ/C`）
+  把 roll 外推到"当前时刻 + 延迟 + 弹丸飞行时间"，再用
+  `R 中心 + 半径绕 R 中心旋转` 求出打击点在相机系下的预测坐标。
+
 ## 依赖
 
 - C++20
