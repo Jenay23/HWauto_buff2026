@@ -217,6 +217,10 @@ cv::Mat (BGR图像)
 否则跟踪器无法正确区分"目标运动"和"自身云台运动"。这部分坐标变换
 与具体机器人平台强相关，不包含在本库中。
 
+## 参考文献
+
+【RM2025-自瞄算法开源】同济大学SuperPower战队(https://bbs.robomaster.com/article/803315)
+(https://github.com/TongjiSuperPower/sp_vision_25/)
 ## 许可证
 
 MIT License，见 [LICENSE](./LICENSE)。
