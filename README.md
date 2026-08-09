@@ -1,4 +1,4 @@
-# buff_algorithm
+# 【RM-2026能量机关算法开源】浙江大学Hello World战队
 
 RoboMaster 能量机关（Buff / 大符 / 小符）自动瞄准算法库。
 
