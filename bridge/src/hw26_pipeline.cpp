@@ -286,7 +286,13 @@ Pipeline::Pipeline(const Config &cfg) : impl_(new Impl(cfg)) {
     if (I.log) {
       I.log << "frame,sim_t_s,latency_ms,gimbal_yaw_deg,gimbal_pitch_deg,n_det,n_sel,solved,"
                "quality,status,buff_dis,roll_rad,roll_vel,lead_s,fly_s,aim_x,aim_y,"
-               "cmd_yaw_deg,cmd_pitch_deg,fire_err_rad,control,fire\n";
+               "cmd_yaw_deg,cmd_pitch_deg,fire_err_rad,control,fire,"
+               // appended (2026-10: diagnostics that were only on stdout before)
+               //   ex_m            |e.x| of the face-frame radial vector, should be ~0
+               //   reproj_px       max reprojection error of the PnP corners [px]
+               //   gimbal_roll_deg gimbal roll (the CSV previously had yaw/pitch only)
+               //   tilt_deg        angle between the face normal and the optical axis
+               "ex_m,reproj_px,gimbal_roll_deg,tilt_deg\n";
     }
   }
 }
@@ -896,7 +902,9 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
             << ',' << out.roll_velocity << ',' << lead << ',' << fly << ',' << out.aim_px_x << ','
             << out.aim_px_y << ',' << out.yaw * 180.0 / M_PI << ','
             << out.pitch * 180.0 / M_PI << ',' << out.fire_err << ',' << (out.control ? 1 : 0)
-            << ',' << (out.fire ? 1 : 0) << '\n';
+            << ',' << (out.fire ? 1 : 0) << ','
+            << out.face_ex << ',' << out.reproj_px << ','
+            << gimbal_roll * 180.0 / M_PI << ',' << out.face_tilt_deg << '\n';
       I.log.flush();
     }
   }
