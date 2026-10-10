@@ -28,9 +28,11 @@ using buff_algo::StatusType;
 namespace {
 
 // ---- 统一的投影助手（消除轴向歧义）----
-// 云台系(X前 Y左 Z上) -> 相机系(OpenCV: X右 Y下 Z前)，等价于 R_camera2gimbal^T * p
+// 云台系(X前 Y左 Z上) -> 相机系(OpenCV: X右 Y下 Z前)
+// 委托给 hw26_pipeline.hpp 里的单一来源 gimbal_to_camera()，
+// 不要再在这里手写公式——相机挂装一变这里就会静默错。
 inline Eigen::Vector3f gimbal_to_cam(const Eigen::Vector3f &p_g) {
-  return Eigen::Vector3f(-p_g.y(), -p_g.z(), p_g.x());
+  return gimbal_to_camera(p_g);
 }
 // 相机系 -> 像素（模拟器畸变为 0）。depth = p_cam.z()
 inline bool project_cam(const Eigen::Vector3f &p_cam, const cv::Mat &K, int *px, int *py) {
@@ -344,9 +346,10 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   std::vector<Pose3f> poses;
   const Eigen::Matrix3f R_cg = gimbal_rotation(gimbal_yaw, gimbal_pitch, gimbal_roll);
   // OpenCV 相机系(X右 Y下 Z前) -> 云台系(X前 Y左 Z上)。
-  // 模拟器源码明确相机旋转 = 云台旋转（main.rs:816），所以这就是全部的外参旋转。
-  Eigen::Matrix3f R_cam2gim;
-  R_cam2gim << 0.f, 0.f, 1.f, -1.f, 0.f, 0.f, 0.f, -1.f, 0.f;
+  // 取值来自 hw26_pipeline.hpp 的单一来源：当前模拟器的相机与枪管平行
+  // （光轴比云台前向高 20.00°）。旧值 [0,0,1,-1,0,0,0,-1,0] 假设相机在云台轴上，
+  // 会让目标在云台系里整体低 20° -> 云台指令低 20° -> 打低。
+  const Eigen::Matrix3f R_cam2gim = R_camera2gimbal();
   // 枪口相对相机光心（云台系）；模拟器 POWER_RUNE_INTERFACE.md:105 的实测外参
   const Eigen::Vector3f t_muzzle(static_cast<float>(I.cfg.muzzle_offset[0]),
                                  static_cast<float>(I.cfg.muzzle_offset[1]),

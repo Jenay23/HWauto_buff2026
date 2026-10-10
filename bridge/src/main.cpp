@@ -72,7 +72,10 @@ int run_selftest_aim(const BridgeConfig &bc) {
            Eigen::AngleAxisf(static_cast<float>(pitch), Vector3f::UnitY()).toRotationMatrix() *
            Eigen::AngleAxisf(static_cast<float>(roll), Vector3f::UnitX()).toRotationMatrix();
   };
-  const auto g2c = [](const Vector3f &g) { return Vector3f(-g.y(), -g.z(), g.x()); };
+  // 云台系 -> 相机系：必须与管道内部用同一个来源（hw26_pipeline.hpp 的
+  // gimbal_to_camera / R_camera2gimbal）。这里**故意不再手写公式**：
+  // 若自检与管道用了不同的相机约定，自检会立刻报超差，正是我们要的交叉检查。
+  const auto g2c = [](const Vector3f &g) { return hw26_bridge::gimbal_to_camera(g); };
   const double fx = bc.algo.camera_matrix.at<double>(0, 0);
   const double fy = bc.algo.camera_matrix.at<double>(1, 1);
   const double ccx = bc.algo.camera_matrix.at<double>(0, 2);

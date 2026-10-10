@@ -20,8 +20,11 @@ blade_half_size: 0.127
 use_muzzle_offset: 1
 muzzle_offset: [0.07383008, -0.00108151, -0.02848256]
 
-# ---- 相机内参（取模拟器 rt/camera_info 的值；1440x1080, FOV_y=45deg, 零畸变）----
-camera_matrix: [1303.686, 0.0, 720.0, 0.0, 1303.686, 540.0, 0.0, 0.0, 1.0]
+# ---- 相机内参（对齐实车 CS016 + 6mm 镜头；1440x1080, 零畸变）----
+#   fx = fy = 6.00mm / 3.45um = 1739.1     fov_y = 34.5°, fov_x = 44.98°
+#   实测模拟器 rt/camera_info 发布 k = [1739.0842, 0, 720, 0, 1739.0842, 540, 0, 0, 1]
+#   原值 1303.686 对应 fov_y=45°，会让 PnP 把 6.9m 的符算成 9.2m -> 打高
+camera_matrix: [1739.1, 0.0, 720.0, 0.0, 1739.1, 540.0, 0.0, 0.0, 1.0]
 distort_coeffs: [0.0, 0.0, 0.0, 0.0, 0.0]
 
 # ---- 打哪个符 ----
@@ -81,11 +84,13 @@ face_lock_frames: 120
 # ④ 能在模拟器上跑稳主要就是靠这四个，缺一个就会把 PnP/滤波噪声放大成晃动。
 #   max_slew_deg_s     限速：clamp(raw - 当前姿态, ±slew*dt)，与帧率无关（④=40）
 #   cmd_smooth_alpha   指令低通：cmd = (1-a)*prev + a*raw（④=0.5）
-#   max_aim_step_px    aim 像素瞬移拒帧：挡住 PnP 翻转/换扇叶那一帧（④=300）
+#   max_aim_step_px    aim 像素瞬移拒帧：挡住 PnP 翻转/换扇叶那一帧
+#                      像素阈值 = 角度 × f，所以要随焦距缩放：
+#                      原 300 @fx=1303.686 -> 400 @fx=1739.1（×1.334）
 #   stale_ms           图像过期门（④=200）
 max_slew_deg_s: 40.0
 cmd_smooth_alpha: 0.5
-max_aim_step_px: 300.0
+max_aim_step_px: 400.0
 stale_ms: 200.0
 # 额外的硬限幅（deg/帧），已被上面的 slew 限幅覆盖，默认关
 max_cmd_step_deg: 0.0

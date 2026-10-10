@@ -32,6 +32,34 @@
 
 namespace hw26_bridge {
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 相机 -> 云台 的外参：**全桥唯一来源**
+//
+// 模拟器的相机是"只取 CAM_DIRECTION 的位置、朝向跟随云台"的，所以相机相对云台的
+// 姿态必须由本桥自己知道（模拟器的 rt/gimbal_pose 只发布云台姿态）。
+//
+// 当前模拟器把相机装成与【枪管平行】：光轴比云台前向高 20.00°
+// （= SHOT_DIRECTION 的仰角；枪管同样比云台前向高 20.00°，两者夹角 0°）。
+//
+// 历史值对照（同一含义、只换挂装）：
+//   [0,0,1, -1,0,0, 0,-1,0]                相机在云台轴上（原模拟器，比枪管低 20°）
+//   [0,0.342020,0.939693, -1,0,0, 0,-0.939693,0.342020]  与枪管平行（现在）
+// 改这里一处即可：gimbal_to_camera() 与所有调用点都由它派生。
+inline Eigen::Matrix3f R_camera2gimbal()
+{
+  Eigen::Matrix3f m;
+  m << 0.f, 0.342020f, 0.939693f,
+      -1.f, 0.f, 0.f,
+      0.f, -0.939693f, 0.342020f;
+  return m;
+}
+
+/// 云台系 -> 相机系（= R_camera2gimbal 的转置；不要再手写公式）
+inline Eigen::Vector3f gimbal_to_camera(const Eigen::Vector3f & p_gimbal)
+{
+  return R_camera2gimbal().transpose() * p_gimbal;
+}
+
 // 观测向量送入 Tracker 前使用的参考系
 enum class RefFrame {
   kFace,     // ★默认★ 符面系：x = 符面法向(车体系里静止)，y-z 为面内基。
@@ -71,7 +99,9 @@ struct Config {
   //   枪口相对相机光心，云台系(X前 Y左 Z上)：前 73.83mm、右 1.08mm、下 28.48mm
   bool use_muzzle_offset = true;
   double muzzle_offset[3] = {0.07383008, -0.00108151, -0.02848256};
-  cv::Mat camera_matrix = (cv::Mat_<double>(3, 3) << 1303.686, 0, 720, 0, 1303.686, 540, 0, 0, 1);
+  // 对齐实车 CS016 + 6mm 镜头: fx = fy = 6.00mm / 3.45um = 1739.1（fov_y = 34.5°）
+  // 原 1303.686 对应 fov_y = 45°，会让 PnP 把 6.9m 的符算成 9.2m
+  cv::Mat camera_matrix = (cv::Mat_<double>(3, 3) << 1739.1, 0, 720, 0, 1739.1, 540, 0, 0, 1);
   cv::Mat distort_coeffs = cv::Mat::zeros(1, 5, CV_64F);
 
   // HW26 自身参数
