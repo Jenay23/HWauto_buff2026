@@ -1,0 +1,4 @@
+build/
+model/
+*.csv
+*.png

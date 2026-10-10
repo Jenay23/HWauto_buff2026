@@ -1,0 +1,103 @@
+# hw26_sim_bridge 配置 — Daedalus 模拟器
+# 运行时可被 --config 覆盖；所有 path 建议写绝对路径
+
+# ---- 检测器后端 ----
+#   detector: sp25  -> 用 sp_vision_25 的 yolo11_buff_int8（④ 已在模拟器上实测 solved≈94%）
+#   detector: hw26  -> 用 HWauto 自带的 YOLO11s-pose（实测在模拟器上输出满画面乱飘的
+#                      0.9 置信度误检，不可用，仅保留供对照）
+detector: "sp25"
+model_sp25: "../model/yolo11_buff_int8.xml"
+model: "../model/buff_ir.xml"        # detector: hw26 时才用
+
+# sp25 的物体点半边长（相对扇叶中心）。sp25 的 OBJECT_POINTS 为
+#   (0,0,0.827),(0,0.127,0.700),(0,0,0.573),(0,-0.127,0.700)
+# -> 相对扇叶中心 (0,0,0.7) 即 (0,0,±h),(0,±h,0)，h=0.127（不是 HW26 的 0.114）
+blade_half_size: 0.127
+
+# 模拟器给的枪口补偿（POWER_RUNE_INTERFACE.md:105，实测外参）：
+#   枪口相对相机光心，云台系(X前 Y左 Z上)：前 73.83mm、右 1.08mm、下 28.48mm
+#   ④ sp25_buff 桥把这项设成 0 漏掉了，这里补上
+use_muzzle_offset: 1
+muzzle_offset: [0.07383008, -0.00108151, -0.02848256]
+
+# ---- 相机内参（取模拟器 rt/camera_info 的值；1440x1080, FOV_y=45deg, 零畸变）----
+camera_matrix: [1303.686, 0.0, 720.0, 0.0, 1303.686, 540.0, 0.0, 0.0, 1.0]
+distort_coeffs: [0.0, 0.0, 0.0, 0.0, 0.0]
+
+# ---- 打哪个符 ----
+#   mode:     1 = 小符, 2 = 大符（HW26 的模型本身分不出大小符，必须显式配置）
+#   my_color: 要打的符颜色  0 = BLUE, 1 = RED
+#             （模拟器场景里：FACE_0 小符/蓝, FACE_1 小符/红, FACE_2 大符/蓝, FACE_3 大符/红）
+mode: 1
+my_color: 0
+
+confidence_threshold: 0.5
+nms_threshold: 0.4
+
+# 是否启用 HW26 Selector 的两道过滤（颜色 / 激活状态）。
+# 诊断"检出但 sel=0"时可以逐个关掉：
+#   filter_color: 0      -> 不看颜色
+#   filter_activation: 0 -> 不看激活状态
+# 两个都设 0 时退化为"取光轴夹角最小"，一定会选中检出到的目标。
+filter_color: 1
+filter_activation: 1
+
+# ---- 弹道 / 瞄准 ----
+bullet_speed: 22.0          # 模拟器弹速 m/s
+gravity: 9.81
+yaw_offset_deg: 0.0
+pitch_offset_deg: -20.0     # 抵消枪管相对云台固定上仰 20deg（模拟器 POWER_RUNE_INTERFACE.md）
+predict_time: 0.10          # 额外提前量 s
+gimbal_lead_time: 0.0       # 手动补偿云台稳态滞后 s（先用 0，看日志里的 fire_err 再调）
+alg_latency: 0.0            # >0 则用它替代实测单帧耗时
+
+# ---- 观测质量闸 ----
+min_distance: 2.0
+max_distance: 15.0
+
+# ---- 火控 ----
+fire_enabled: 1
+fire_err_rad: 0.02          # 云台到位残差门（与 ④ 一致）
+fire_stable_frames: 3
+fire_cooldown: 1.0
+
+# ---- 其它 ----
+# 观测参考系：
+#   face    = ★默认★ 符面系。x = 符面法向(车体系里静止)，y-z 为面内基。
+#             同时解决两件事：(1) e=R*(0,0,-0.7) 落在面内 -> e.x=0 精确成立，
+#             HW26 的 roll/predict_position 完全精确；(2) 坐标系不随云台转
+#             -> 不存在"把观测挂在自己输出上"的正反馈，不会自激抖动
+#   chassis = 车体系（静止，但符在侧方时 e.x!=0 -> 16~23cm 系统偏差）
+#   gimbal  = 相机/云台系（**会自激抖动**）。相机与枪管固定，云台系就是瞄准系，
+#             把观测放在这里等于把观测挂在自己的输出上 -> 正反馈。仅留作对照
+frame: "face"
+
+# 符面法向的平滑（符不动，所以可以很慢；太快会把 PnP 噪声引进来）
+face_ema: 0.10
+face_ema_locked: 0.003
+face_lock_frames: 120
+
+# ===== 以下四个护栏【原样对齐 ④ sp25_buff/cpp_lib/buff_vision.cpp:190-200】=====
+# ④ 能在模拟器上跑稳主要就是靠这四个，缺一个就会把 PnP/滤波噪声放大成晃动。
+#   max_slew_deg_s     限速：clamp(raw - 当前姿态, ±slew*dt)，与帧率无关（④=40）
+#   cmd_smooth_alpha   指令低通：cmd = (1-a)*prev + a*raw（④=0.5）
+#   max_aim_step_px    aim 像素瞬移拒帧：挡住 PnP 翻转/换扇叶那一帧（④=300）
+#   stale_ms           图像过期门（④=200）
+max_slew_deg_s: 40.0
+cmd_smooth_alpha: 0.5
+max_aim_step_px: 300.0
+stale_ms: 200.0
+# 额外的硬限幅（deg/帧），已被上面的 slew 限幅覆盖，默认关
+max_cmd_step_deg: 0.0
+
+# 是否启用 sp25 的 R 中心精修（二值化100 + 5x5膨胀 + 圆mask + minAreaRect）
+refine_r_center: 1
+visualize: 1
+log_every: 30
+log_path: "hw26_bridge_log.csv"
+
+# ---- 话题 ----
+image_topic: "rt/image_raw"
+pose_topic: "rt/gimbal_pose"
+cmd_topic: "cmd/gimbal"
+max_image_age_ms: 300.0
