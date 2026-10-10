@@ -98,7 +98,9 @@ max_cmd_step_deg: 0.0
 # 是否启用 sp25 的 R 中心精修（二值化100 + 5x5膨胀 + 圆mask + minAreaRect）
 refine_r_center: 1
 visualize: 1
-log_every: 30
+# Log every frame (not every 30th) so the CSV can be joined 1:1 with the
+# telemetry recorder's one-row-per-image-frame CSV on sim_t_ns.
+log_every: 1
 log_path: "hw26_bridge_log.csv"
 
 # ---- 话题 ----

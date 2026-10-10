@@ -284,7 +284,7 @@ Pipeline::Pipeline(const Config &cfg) : impl_(new Impl(cfg)) {
   if (!cfg.log_path.empty()) {
     I.log.open(cfg.log_path, std::ios::out | std::ios::trunc);
     if (I.log) {
-      I.log << "frame,sim_t_s,latency_ms,gimbal_yaw_deg,gimbal_pitch_deg,n_det,n_sel,solved,"
+      I.log << "frame,sim_t_ns,latency_ms,gimbal_yaw_deg,gimbal_pitch_deg,n_det,n_sel,solved,"
                "quality,status,buff_dis,roll_rad,roll_vel,lead_s,fly_s,aim_x,aim_y,"
                "cmd_yaw_deg,cmd_pitch_deg,fire_err_rad,control,fire,"
                // appended (2026-10: diagnostics that were only on stdout before)
@@ -895,7 +895,10 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   if (I.log) {
     const bool interesting = out.fire || (I.frame_count % std::max(1, I.cfg.log_every) == 0);
     if (interesting) {
-      I.log << I.frame_count << ',' << t_rel << ',' << out.latency_ms << ','
+      // Absolute image timestamp (unix-epoch ns) so this CSV can be joined with
+      // any other log on the same clock. The old column here was t_rel, a
+      // RELATIVE time since the bridge anchored, which cannot be joined.
+      I.log << I.frame_count << ',' << sim_timestamp_ns << ',' << out.latency_ms << ','
             << gimbal_yaw * 180.0 / M_PI << ',' << gimbal_pitch * 180.0 / M_PI << ',' << out.n_det
             << ',' << out.n_selected << ',' << (out.solved ? 1 : 0) << ','
             << (out.quality ? 1 : 0) << ',' << out.status << ',' << out.buff_dis << ',' << out.roll

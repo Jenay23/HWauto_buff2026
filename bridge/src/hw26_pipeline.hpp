@@ -147,7 +147,7 @@ struct Config {
   // 是否启用 sp25 的 R 中心精修（二值化100+5x5膨胀+圆mask+minAreaRect）
   bool refine_r_center = true;
   bool visualize = true;
-  int log_every = 30;
+  int log_every = 1;   // every frame: required for a 1:1 join on sim_t_ns
   std::string log_path;  // 空则不打日志
 };
 
