@@ -214,15 +214,18 @@ struct Pipeline::Impl {
   cv::Point2f last_rcenter{0.f, 0.f};
   cv::Point2f last_rcenter_rough{0.f, 0.f};
 
-  // IPPE 双解消歧的"上一帧位姿"。**必须按靶标分开两份**：
-  // 大符每帧要解两片靶标，若共用一份，解第 2 片时比较的是第 1 片上一帧的位姿
-  // -> 双解选错 -> 该片 roll 跳 ~180° -> 相位差的符号翻转 -> 按相位排的组号
-  // 也跟着翻（实测现象：黄/品红来回换）。槽 0 给小符/单靶标用。
-  static constexpr int kPoseSlots = 2;
-  bool has_prev_pose[kPoseSlots] = {false, false};
-  Eigen::Vector3f prev_t[kPoseSlots] = {Eigen::Vector3f::Zero(), Eigen::Vector3f::Zero()};
-  Eigen::Quaternionf prev_q[kPoseSlots] = {Eigen::Quaternionf::Identity(),
-                                           Eigen::Quaternionf::Identity()};
+  // IPPE 双解消歧用的"上一帧位姿"。大符每帧要解两片，所以这里存【上一帧的全部位姿】
+  // （最多 2 个）。
+  //
+  // 之前试过"按 selected 的下标分槽"，那是错的：selected 是按【置信度】排序的，
+  // 两片置信度一换（实测 0.91 <-> 0.89），槽位就交叉了，连续性状态仍然对错了片。
+  //
+  // 正确做法是【不依赖身份】：每个靶标的两个 IPPE 解，各自与上一帧的【所有】位姿
+  // 比连续性，取最连续的那个。上一帧的两个位姿里必然有一个是它的（另一片是噪点，
+  // 距离远），所以 min-over-all 一定选对。
+  std::vector<Eigen::Vector3f> prev_ts;
+  std::vector<Eigen::Quaternionf> prev_qs;
+  std::vector<float> prev_rolls;   // 上一帧两片各自的 roll（诊断用）
 
   std::unique_ptr<buff_algo::BuffSelector> selector;
   std::unique_ptr<buff_algo::BuffPnPSolver> solver;
@@ -394,6 +397,7 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   // 可视化要把黄/品红的组号稳定地绑在同一片靶标上，就需要这个映射；
   // 融合块在更外层，所以必须声明在这里。
   std::vector<std::size_t> selected_src;
+  std::vector<float> cur_rolls;   // 本帧两片各自的 roll（诊断用）
   const Eigen::Matrix3f R_cg = gimbal_rotation(gimbal_yaw, gimbal_pitch, gimbal_roll);
   // OpenCV 相机系(X右 Y下 Z前) -> 云台系(X前 Y左 Z上)。
   // 取值来自 hw26_pipeline.hpp 的单一来源：当前模拟器的相机与枪管平行
@@ -421,8 +425,7 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   };
   auto solve_pose_ippe = [&](const cv::Point2f &pt, const cv::Point2f &pl,
                              const cv::Point2f &pb, const cv::Point2f &pr,
-                             int slot) -> std::optional<Pose3f> {
-    slot = (slot < 0 || slot >= Impl::kPoseSlots) ? 0 : slot;
+                             int *pick_out = nullptr) -> std::optional<Pose3f> {
     const std::vector<cv::Point2f> img = {pt, pl, pb, pr};
     std::vector<cv::Mat> rvecs, tvecs;
     std::vector<double> errs;
@@ -438,7 +441,7 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
     int pick = 0;
     if (rvecs.size() == 1) {
       pick = 0;
-    } else if (!I.has_prev_pose[slot]) {
+    } else if (I.prev_ts.empty()) {
       pick = (errs.size() >= 2 && errs[1] < errs[0]) ? 1 : 0;
     } else {
       // 连续性判据必须放在【静止系】里比较：这里用云台系，因为 prev 也在同一
@@ -455,10 +458,18 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
           for (int b = 0; b < 3; ++b) Re(a, b) = static_cast<float>(Rm.at<double>(a, b));
         const Eigen::Vector3f t_g = R_cam2gim * t_c;
         const Eigen::Quaternionf q(Eigen::Matrix3f(R_cam2gim * Re * R_cam2gim.transpose()));
-        const double dt = (t_g - I.prev_t[slot]).norm();
-        const double dq =
-            2.0 * std::acos(
-                std::min(1.0, std::abs(static_cast<double>(q.dot(I.prev_q[slot])))));
+        // 与上一帧【每一个】位姿都算一遍代价，取最小 —— 不依赖"这片是 1 号还是 2 号"
+        double dt = 1e18;
+        double dq = 1e18;
+        for (std::size_t h = 0; h < I.prev_ts.size(); ++h) {
+          const double dth = (t_g - I.prev_ts[h]).norm();
+          const double dqh = 2.0 * std::acos(std::min(
+              1.0, std::abs(static_cast<double>(q.dot(I.prev_qs[h])))));
+          if (2.0 * dth + dqh < 2.0 * dt + dq) {
+            dt = dth;
+            dq = dqh;
+          }
+        }
         const double score = 2.0 * dt + dq;
         if (score < best) {
           best = score;
@@ -478,11 +489,9 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
     Pose3f p;
     p.translation = R_cam2gim * t_cam;                    // 相机系 -> 云台系
     p.rotation = Eigen::Quaternionf(R_cam2gim * Re).normalized();
-    I.has_prev_pose[slot] = true;
-    I.prev_t[slot] = p.translation;   // 云台系
-    I.prev_q[slot] = p.rotation;      // 云台系
     out.n_solutions = static_cast<int>(rvecs.size());
     out.sol_pick = pick;
+    if (pick_out) *pick_out = pick;
     return p;
   };
 
@@ -525,7 +534,7 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
 
       // 走两个后端共用的 PnP（物体点 0.127，见本函数开头的 solve_pose_ippe）
       if (const auto pose =
-            solve_pose_ippe(det->kpt[0], det->kpt[1], det->kpt[2], det->kpt[3], 0)) {
+            solve_pose_ippe(det->kpt[0], det->kpt[1], det->kpt[2], det->kpt[3])) {
         poses.push_back(*pose);
       }
     }
@@ -538,7 +547,7 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
     const cv::Point2f &pb = I.ext_kpts[2];
     const cv::Point2f &pr = I.ext_kpts[3];
     for (const auto &q : I.ext_kpts) I.last_kpt.push_back(q);
-    if (const auto pose = solve_pose_ippe(pt, pl, pb, pr, 0)) poses.push_back(*pose);
+    if (const auto pose = solve_pose_ippe(pt, pl, pb, pr)) poses.push_back(*pose);
     DetInfo di;
     di.color = I.cfg.buff_color;
     di.label = 0;
@@ -680,18 +689,45 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   //    consts::BUFF_POINTS = 0.114，那是它实车靶板的尺寸，用在模拟器上会让
   //    距离偏大约 10%（实测 10.18% vs 0.127 的 0.18%）。
   //    BuffDetection 的 t/l/b/r 与 sp25 的 kpt[0..3] 都是"上/左/下/右"同一批物理点。
-  for (std::size_t si = 0; si < selected.size(); ++si) {
-    const auto &b = selected[si];
-    // 每个靶标用【自己】的连续性槽位：大符两片各自独立消歧，互不干扰
-    const int slot = static_cast<int>(si);
-    if (const auto pose =
-            solve_pose_ippe(cv::Point2f(b.t.x(), b.t.y()), cv::Point2f(b.l.x(), b.l.y()),
-                            cv::Point2f(b.b.x(), b.b.y()), cv::Point2f(b.r.x(), b.r.y()), slot)) {
-      poses.push_back(*pose);
+  {
+    int picks[2] = {-1, -1};
+    int pi = 0;
+    for (const auto &b : selected) {
+      int pk = -1;
+      if (const auto pose =
+              solve_pose_ippe(cv::Point2f(b.t.x(), b.t.y()), cv::Point2f(b.l.x(), b.l.y()),
+                              cv::Point2f(b.b.x(), b.b.y()), cv::Point2f(b.r.x(), b.r.y()), &pk)) {
+        poses.push_back(*pose);
+        if (pi < 2) picks[pi++] = pk;
+      }
     }
+    for (int i = 0; i < 2; ++i) out.sol_pick_t[i] = picks[i];
   }
   }  // end if ext_kpts ... else（合成自检 vs 真实推理）
   }  // end if detector==kSp25 ... else
+
+  // 6-pre) 把本帧解出的位姿存成"上一帧位姿"，供下一帧的双解连续性使用。
+  //         存全部（最多 2 片），不做身份绑定。
+  I.prev_ts.clear();
+  I.prev_qs.clear();
+  for (const auto &q : poses) {
+    if (I.prev_ts.size() >= 2) break;
+    I.prev_ts.push_back(q.translation);
+    I.prev_qs.push_back(q.rotation);
+  }
+  // 6g) 诊断：两片 roll 的帧间变化（不依赖身份的最优配对）。
+  //     某一对残差接近 180 度 = 那片发生了 IPPE 双解翻转 -> 相位被翻到对面。
+  if (cur_rolls.size() == 2 && I.prev_rolls.size() == 2) {
+    auto wa = [](double a) { return wrap_pi(a); };
+    const double a00 = std::abs(wa(cur_rolls[0] - I.prev_rolls[0]));
+    const double a11 = std::abs(wa(cur_rolls[1] - I.prev_rolls[1]));
+    const double a01 = std::abs(wa(cur_rolls[0] - I.prev_rolls[1]));
+    const double a10 = std::abs(wa(cur_rolls[1] - I.prev_rolls[0]));
+    const bool straight = (std::max(a00, a11) <= std::max(a01, a10));
+    out.droll_deg[0] = (straight ? a00 : a01) * 180.0 / M_PI;
+    out.droll_deg[1] = (straight ? a11 : a10) * 180.0 / M_PI;
+  }
+  I.prev_rolls = cur_rolls;
 
   // 6) 观测系变换 + 质量闸 + 送入 Tracker
   if (!poses.empty()) {
@@ -840,6 +876,7 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       obs = A;
       out.dual_targets = 2;
       out.dual_delta_deg = delta * 180.0 / M_PI;
+      cur_rolls = {A.roll, B.roll};
       out.meas_a_valid = true;
       out.meas_b_valid = true;
       out.meas_a_ch = obs2ch_v(pose0_is_a ? use.translation : use2.translation);

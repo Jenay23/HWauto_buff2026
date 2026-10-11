@@ -929,6 +929,17 @@ int main(int argc, char **argv) {
             out.rc_dist_m);
         std::fflush(stdout);
       }
+      // 大符专项诊断（限流）：用来定位"黄/品红为什么还在换"。
+      //   droll = 本帧两片 roll 与上一帧两片 roll 做【不依赖身份】最优配对后的两个残差。
+      //           某一对接近 180 度 => 那片发生了 IPPE 双解翻转（相位翻到对面）。
+      //   pick  = 两片各自选了第几个 IPPE 解；若某片的 pick 在 0/1 间来回跳，就是它。
+      if (out.dual_targets == 2 && k % 10 == 0) {
+        std::printf(
+            "[dual] droll=(%.1f,%.1f)deg pick=(%d,%d) dres=%.1fdeg rcd=%.2fm dlt=%.0f rc=%.2f\n",
+            out.droll_deg[0], out.droll_deg[1], out.sol_pick_t[0], out.sol_pick_t[1],
+            out.dual_resid_deg, out.dual_rcd_m, out.dual_delta_deg, out.rc_dist_m);
+        std::fflush(stdout);
+      }
       if (max_frames > 0 && static_cast<int>(k) >= max_frames) {
         g_stop = true;
         break;
