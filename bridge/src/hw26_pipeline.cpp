@@ -275,6 +275,9 @@ Pipeline::Pipeline(const Config &cfg) : impl_(new Impl(cfg)) {
   const int64_t out_cols = (oshp.size() == 3) ? static_cast<int64_t>(oshp[2]) : -1;
   if (out_cols == kOutputColumns) {
     I.cfg.detector = DetectorKind::kHw26;
+    // HW26 的 t/l/b/r 与 sp25 的 kpt[0..3] 不是同一批物理点，物体点半尺寸必须分开。
+    // 【待验证】换过来之后 dis 应从 ~9.4 m 变成 ~6.4 m
+    I.cfg.blade_half_size = I.cfg.blade_half_size_hw26;
   } else if (out_rows == kSp25OutRows) {
     I.cfg.detector = DetectorKind::kSp25;
   } else {

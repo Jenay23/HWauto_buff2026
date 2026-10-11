@@ -97,7 +97,12 @@ struct Config {
   // 打击板四点的半边长（相对扇叶中心），(0,0,±h),(0,±h,0)。
   // 两个模型的上/左/下/右四点指同一批物理点，所以共用。两个后端都走桥自实现的
   // PnP，不调用 HW26 的 Solver（它的 BUFF_POINTS=0.114 在模拟器上距离偏 10%）。
-  double blade_half_size = 0.127;
+  double blade_half_size = 0.127;       // sp25 后端（4 个关键点）的半径，实测标定过
+  // HW26 后端（t/l/b/r 是八边形相邻顶点的中点）用的是【另一批物理点】，半径不同。
+  // 用两片靶标的图像间距反推真值距离得到：0.127 * 6.4/9.45 ≈ 0.086
+  // （reproj 查不出这个尺度错误：平面靶标 PnP 有尺度不可分辨性）
+  // 【待验证】改完 dis 应≈6.4 m 而不是现在的 9.4 m
+  double blade_half_size_hw26 = 0.088;
   // 模拟器给的枪口补偿（POWER_RUNE_INTERFACE.md:105）：
   //   枪口相对相机光心，云台系(X前 Y左 Z上)：前 73.83mm、右 1.08mm、下 28.48mm
   bool use_muzzle_offset = true;

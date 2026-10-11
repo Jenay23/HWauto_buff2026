@@ -262,6 +262,8 @@ BridgeConfig load_config(const std::string &path) {
   // （[1,5040,26]->HW26, [1,17,8400]->sp25），因此不可能出现"开关与路径不匹配"。
   bc.algo.model_path = fs.gets("model", bc.algo.model_path);
   bc.algo.blade_half_size = fs.getd("blade_half_size", bc.algo.blade_half_size);
+  bc.algo.blade_half_size_hw26 =
+      fs.getd("blade_half_size_hw26", bc.algo.blade_half_size_hw26);
   bc.algo.use_muzzle_offset = fs.getb("use_muzzle_offset", bc.algo.use_muzzle_offset);
   const auto mo = fs.lists.count("muzzle_offset") ? fs.lists.at("muzzle_offset") : std::vector<double>{};
   if (mo.size() == 3) {
@@ -746,6 +748,7 @@ int main(int argc, char **argv) {
   std::cout << "[bridge] config=" << cfg_path << "\n"
             << "[bridge] model=" << bc.algo.model_path
             << "  blade_half=" << bc.algo.blade_half_size
+            << "/" << bc.algo.blade_half_size_hw26
             << "  muzzle_comp=" << (bc.algo.use_muzzle_offset ? "on" : "off") << "\n"
             << "[bridge] mode=" << bc.algo.buff_mode
             << " (1=small,2=big)  my_color=" << bc.algo.buff_color << " (0=BLUE,1=RED)\n"
