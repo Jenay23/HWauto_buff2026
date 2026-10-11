@@ -37,8 +37,9 @@ class LocalRuneTracker {
   //   3) 拟合 RMS 残差 <= max_rms_deg（默认 2.5 度）—— 数据不自洽时宁可不给预测
   // 实测教训：一开始只用 6 个样本就 ready，绿点很早就出现，但跟踪特别差。
   bool ready() const {
-    return static_cast<int>(h_.size()) >= min_n_ && span_deg_ >= min_span_deg_ &&
-           rms_deg_ >= 0.0 && rms_deg_ <= max_rms_deg_;
+    // 已锁存正弦参数（残差够小过）+ 样本够 + 残差仍在门内
+    return locked_ != 0 && static_cast<int>(h_.size()) >= 4 && rms_deg_ >= 0.0 &&
+           rms_deg_ <= max_rms_deg_;
   }
   int n() const { return static_cast<int>(h_.size()); }
 
@@ -47,6 +48,9 @@ class LocalRuneTracker {
 
   // 最近一次拟合得到的角速度 / 角加速度（诊断用；未 ready 时为 0）
   double velocity() const { return v_now_; }
+  double omega() const { return omega_; }
+  double amp() const { return amp_; }
+  bool locked() const { return locked_ != 0; }
   double accel() const { return a_now_; }
 
   void set_window(int n) { win_ = n; }
@@ -65,8 +69,9 @@ class LocalRuneTracker {
     double roll;  // 解缠后的
   };
 
-  // 以最后一个样本为时间原点做二次最小二乘，返回系数 (a0, a1, a2)
-  bool fit(Eigen::Vector3d *coef, double *t_ref) const;
+  // 正弦模型拟合：phase(t) = c0 + c1*t + c2*sin(w t) + c3*cos(w t)
+  // 对固定 w 线性，闭式最小二乘；w 在 [1.884,2.000] 网格搜索取残差最小者。
+  bool fit(Eigen::Vector4d *coef, double *omega_out, double *t_ref_out);
 
   std::deque<Sample> h_;
   double last_raw_ = 0.0;
@@ -80,6 +85,13 @@ class LocalRuneTracker {
   double ridge_ = 1e-3;
   double v_now_ = 0.0;
   double a_now_ = 0.0;
+  // --- 正弦模型锁存 ---
+  int locked_ = 0;                                  // 参数是否已锁存
+  Eigen::Vector4d lock_c_ = Eigen::Vector4d::Zero();  // c0..c3
+  double lock_w_ = 0.0;                             // 锁存的 omega
+  double lock_t_ref_ = 0.0;                         // 锁存时的时间原点
+  double omega_ = 0.0;                              // 最近一次拟合的 omega（诊断）
+  double amp_ = 0.0;                                // 角速度振幅 a（诊断）
   double rms_deg_ = -1.0;
   double span_deg_ = 0.0;
 };

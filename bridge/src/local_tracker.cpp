@@ -5,6 +5,13 @@
 
 namespace {
 constexpr double kPi = 3.14159265358979323846;
+constexpr double kMaxJumpDeg = 12.0;  // 单帧相位跳变上限（超过就丢样本+重置窗口）
+
+// 模拟器规则给出的硬边界（与 HW26 的 big_buff_observer.ransac 完全一致）
+constexpr double kOmegaLo = 1.884;
+constexpr double kOmegaHi = 2.000;
+constexpr int kOmegaSteps = 64;
+constexpr double kRidge = 1e-6;
 
 double wrapPi(double a) {
   while (a > kPi) a -= 2.0 * kPi;
@@ -18,75 +25,122 @@ void LocalRuneTracker::reset() {
   have_last_ = false;
   v_now_ = 0.0;
   a_now_ = 0.0;
+  rms_deg_ = -1.0;
+  span_deg_ = 0.0;
+  omega_ = 0.0;
+  amp_ = 0.0;
+  locked_ = 0;
+}
+
+// ---------------------------------------------------------------------------
+// 正弦模型拟合（与 HW26 同一族模型，但解法和它不同）
+//   相位模型：  phase(t) = c0 + c1*t + c2*sin(w*t) + c3*cos(w*t)
+//   它等价于 v(t) = a*sin(w*t+phi) + C 的积分形式。
+//   对【固定 w】它对 (c0..c3) 线性 -> 闭式最小二乘；
+//   再对 w 在 [1.884, 2.000]（模拟器/ HW26 给的硬范围）做网格搜索取残差最小者。
+//
+//   为什么比 HW26 的 RANSAC 好：
+//     HW26 每个假设只用 3 个点（最小样本），3 个点的噪声直接进解，所以要很多点
+//     才凑够内点；这里是【窗口内全部点】一起最小二乘，噪声被平均掉 sqrt(N)。
+//   为什么锁存：参数在一次激活内固定（模拟器规则），拟合成功一次后没必要每帧
+//     重搜；锁住即可，只有残差变大（换了一次激活）才该重拟合。
+// ---------------------------------------------------------------------------
+bool LocalRuneTracker::fit(Eigen::Vector4d *coef, double *omega_out, double *t_ref_out) {
+  const int n = static_cast<int>(h_.size());
+  if (n < 4) return false;
+
+  // 以窗口【中点】为时间原点：短窗口下比用首/末点更能改善条件数
+  const double t_ref = 0.5 * (h_.front().t + h_.back().t);
+
+  double best_rms = 1e18;
+  Eigen::Vector4d best_c = Eigen::Vector4d::Zero();
+  double best_w = 0.0;
+  bool found = false;
+
+  for (int gi = 0; gi <= kOmegaSteps; ++gi) {
+    const double w = kOmegaLo + (kOmegaHi - kOmegaLo) * gi / kOmegaSteps;
+    Eigen::Matrix4d A = Eigen::Matrix4d::Zero();
+    Eigen::Vector4d b = Eigen::Vector4d::Zero();
+    for (const auto &s : h_) {
+      const double tau = s.t - t_ref;
+      Eigen::Vector4d phi(1.0, tau, std::sin(w * tau), std::cos(w * tau));
+      A += phi * phi.transpose();
+      b += phi * s.roll;
+    }
+    A(1, 1) += kRidge;
+    A(2, 2) += kRidge;
+    A(3, 3) += kRidge;
+    const Eigen::Vector4d c = A.ldlt().solve(b);
+    if (!c.allFinite()) continue;
+
+    double se = 0.0;
+    for (const auto &s : h_) {
+      const double tau = s.t - t_ref;
+      const double pred =
+          c(0) + c(1) * tau + c(2) * std::sin(w * tau) + c(3) * std::cos(w * tau);
+      const double e = s.roll - pred;
+      se += e * e;
+    }
+    const double rms = std::sqrt(se / static_cast<double>(n));
+    if (!found || rms < best_rms) {
+      found = true;
+      best_rms = rms;
+      best_c = c;
+      best_w = w;
+    }
+  }
+  if (!found) return false;
+
+  *coef = best_c;
+  *omega_out = best_w;
+  *t_ref_out = t_ref;
+  amp_ = std::hypot(best_c(2), best_c(3)) * best_w;  // 角速度振幅 a（诊断用）
+  rms_deg_ = best_rms * 180.0 / kPi;
+  return true;
 }
 
 void LocalRuneTracker::push(double t, double roll) {
-  double unwrapped = roll;
+  // 跳变卫兵：单帧变化过大 -> 这一帧不可信 -> 清空窗口重新开始
+  // （依据：转盘最快 2.09 rad/s，30fps 下单帧最多 ~4 度）
   if (have_last_) {
-    // 解缠：把与上一个样本的差映射到 (-pi, pi]，累加到连续相位上
-    unwrapped = last_unwrapped_ + wrapPi(roll - last_raw_);
+    const double jump = std::abs(wrapPi(roll - last_raw_)) * 180.0 / kPi;
+    if (jump > kMaxJumpDeg) reset();
   }
+  double unwrapped = roll;
+  if (have_last_) unwrapped = last_unwrapped_ + wrapPi(roll - last_raw_);
   last_raw_ = roll;
   last_unwrapped_ = unwrapped;
   have_last_ = true;
 
   h_.push_back({t, unwrapped});
   while (static_cast<int>(h_.size()) > win_) h_.pop_front();
+  span_deg_ = std::abs(h_.back().roll - h_.front().roll) * 180.0 / kPi;
 
-  Eigen::Vector3d c;
-  double t_ref = 0.0;
-  if (fit(&c, &t_ref)) {
-    v_now_ = c(1);        // 相位对时间的一阶导（局部时刻）
-    a_now_ = 2.0 * c(2);
-    // 诊断：拟合残差 RMS 与窗口内的相位跨度
-    double se = 0.0;
-    for (const auto &s : h_) {
-      const double tau = s.t - t_ref;
-      const double pred = c(0) + c(1) * tau + c(2) * tau * tau;
-      const double e = s.roll - pred;
-      se += e * e;
+  Eigen::Vector4d c;
+  double w = 0.0, t_ref = 0.0;
+  if (fit(&c, &w, &t_ref)) {
+    omega_ = w;
+    const double tau = t - t_ref;
+    v_now_ = c(1) + w * (c(2) * std::cos(w * tau) - c(3) * std::sin(w * tau));
+    a_now_ = -w * w * (c(2) * std::sin(w * tau) + c(3) * std::cos(w * tau));
+    // 残差够小就锁存（参数在一次激活内固定）
+    if (rms_deg_ >= 0.0 && rms_deg_ <= 2.5) {
+      locked_ = 1;
+      lock_c_ = c;
+      lock_w_ = w;
+      lock_t_ref_ = t_ref;
     }
-    rms_deg_ = std::sqrt(se / static_cast<double>(h_.size())) * 180.0 / kPi;
-    // 取绝对值：转盘可能正转也可能反转。之前用带符号的值，导致反转时
-    // span 恒为负，span>=min_span 的判据永远不成立 -> 永不 ready（实测确认）。
-    span_deg_ = std::abs(h_.back().roll - h_.front().roll) * 180.0 / kPi;
   }
-  if (h_.size() < 3) {
-    rms_deg_ = -1.0;
-    span_deg_ = 0.0;
-  }
-}
-
-bool LocalRuneTracker::fit(Eigen::Vector3d *coef, double *t_ref) const {
-  if (static_cast<int>(h_.size()) < 3) return false;
-
-  // 以最后一个样本为时间原点 —— 短窗口下这是改善条件数的关键
-  const double tr = h_.back().t;
-  Eigen::Matrix3d A = Eigen::Matrix3d::Zero();
-  Eigen::Vector3d b = Eigen::Vector3d::Zero();
-  for (const auto &s : h_) {
-    const double tau = s.t - tr;
-    const Eigen::Vector3d phi(1.0, tau, tau * tau);
-    A += phi * phi.transpose();
-    b += phi * s.roll;
-  }
-  // 3x3 对称正定，用 LDLT
-  // ridge：只惩罚 (速度, 加速度) 两项，不惩罚常数项（相位本身是无界的）
-  A(1, 1) += ridge_;
-  A(2, 2) += ridge_;
-  const Eigen::Vector3d c = A.ldlt().solve(b);
-  if (!c.allFinite()) return false;
-  *coef = c;
-  *t_ref = tr;
-  return true;
 }
 
 bool LocalRuneTracker::predict(double t_future, double *roll_out) const {
-  if (!ready()) return false;
-  Eigen::Vector3d c;
-  double t_ref = 0.0;
-  if (!fit(&c, &t_ref)) return false;
-  const double dt = t_future - t_ref;
-  *roll_out = wrapPi(c(0) + c(1) * dt + c(2) * dt * dt);
+  if (locked_ == 0) return false;
+  if (static_cast<int>(h_.size()) < min_n_) return false;
+  const double w = lock_w_;
+  const double tau = t_future - lock_t_ref_;
+  if (std::abs(tau) > 3.0) return false;  // 外推太远不信
+  *roll_out =
+      wrapPi(lock_c_(0) + lock_c_(1) * tau + lock_c_(2) * std::sin(w * tau) +
+             lock_c_(3) * std::cos(w * tau));
   return true;
 }
