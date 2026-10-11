@@ -47,7 +47,9 @@ void LocalRuneTracker::push(double t, double roll) {
       se += e * e;
     }
     rms_deg_ = std::sqrt(se / static_cast<double>(h_.size())) * 180.0 / kPi;
-    span_deg_ = (h_.back().roll - h_.front().roll) * 180.0 / kPi;
+    // 取绝对值：转盘可能正转也可能反转。之前用带符号的值，导致反转时
+    // span 恒为负，span>=min_span 的判据永远不成立 -> 永不 ready（实测确认）。
+    span_deg_ = std::abs(h_.back().roll - h_.front().roll) * 180.0 / kPi;
   }
   if (h_.size() < 3) {
     rms_deg_ = -1.0;
