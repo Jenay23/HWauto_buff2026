@@ -420,6 +420,10 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   // 可视化要把黄/品红的组号稳定地绑在同一片靶标上，就需要这个映射；
   // 融合块在更外层，所以必须声明在这里。
   std::vector<std::size_t> selected_src;
+  // 与 poses 平行的来源下标。**组号必须用这个**（不能用与 selected 平行的
+  // selected_src）：某片 PnP 失败时 poses 会变短，两者一错位，黄/品红就会
+  // 落到错误的靶标上 —— 这正是"亮绿/暗绿稳、黄/品红跳"的原因。
+  std::vector<std::size_t> pose_src;
   std::vector<float> cur_rolls;   // 本帧两片各自的 roll（诊断用）
   const Eigen::Matrix3f R_cg = gimbal_rotation(gimbal_yaw, gimbal_pitch, gimbal_roll);
   // OpenCV 相机系(X右 Y下 Z前) -> 云台系(X前 Y左 Z上)。
@@ -723,12 +727,15 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   {
     int picks[2] = {-1, -1};
     int pi = 0;
-    for (const auto &b : selected) {
+    for (std::size_t si = 0; si < selected.size(); ++si) {
+    const auto &b = selected[si];
       int pk = -1;
       if (const auto pose =
               solve_pose_ippe(cv::Point2f(b.t.x(), b.t.y()), cv::Point2f(b.l.x(), b.l.y()),
                               cv::Point2f(b.b.x(), b.b.y()), cv::Point2f(b.r.x(), b.r.y()), &pk)) {
         poses.push_back(*pose);
+        // ★ 与 poses 同步记录：只有 PnP 成功的才 push，两边永远一一对应
+        pose_src.push_back(selected_src.size() > si ? selected_src[si] : si);
         if (pi < 2) picks[pi++] = pk;
       }
     }
@@ -946,11 +953,11 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
         std::swap(A, B);
         pose0_is_a = false;
       }
-      const std::size_t src_a = selected_src.size() >= 2
-                                    ? (pose0_is_a ? selected_src[0] : selected_src[1])
+      const std::size_t src_a = pose_src.size() >= 2
+                                    ? (pose0_is_a ? pose_src[0] : pose_src[1])
                                     : 0;
-      const std::size_t src_b = selected_src.size() >= 2
-                                    ? (pose0_is_a ? selected_src[1] : selected_src[0])
+      const std::size_t src_b = pose_src.size() >= 2
+                                    ? (pose0_is_a ? pose_src[1] : pose_src[0])
                                     : 1;
       const double step = 2.0 * M_PI / 5.0;
       const double d = wrap_pi(static_cast<double>(B.roll) - static_cast<double>(A.roll));  // >= 0
@@ -1309,8 +1316,11 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
           cv::Scalar(255, 0, 255),   // 品红
           cv::Scalar(0, 128, 255),   // 橙
       };
-      for (std::size_t g = 0; g < out.det_kpts.size(); ++g) {
-        const cv::Scalar &col = kGroupColor[g < 3 ? g : 2];
+      // 只画前两组：模拟器加了 --rune 之后，另一个转盘的亮靶标不再出现，
+      // 原来的第 3 组（橙色）已经不会有，绘制删掉。
+      const std::size_t kDrawGroups = std::min<std::size_t>(2, out.det_kpts.size());
+      for (std::size_t g = 0; g < kDrawGroups; ++g) {
+        const cv::Scalar &col = kGroupColor[g];
         const bool is_second = (g == 1);
         for (const auto &d : out.det_kpts[g]) {
           cv::circle(out.debug, {static_cast<int>(d.x), static_cast<int>(d.y)},
