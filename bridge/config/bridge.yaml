@@ -114,7 +114,7 @@ local_tracker: 1
 #   1 = AR(4)（纯数据驱动，短程最好）
 #   2 = EKF（状态 [theta,a,w,phi]；离线实测不好，留作对比）
 #   3 = free（自由线性正弦；能拟合但会漂，兜底用）
-local_model: 0
+local_model: 3
 
 # ---- 弹道 / 瞄准 ----
 bullet_speed: 22.0          # 模拟器弹速 m/s
