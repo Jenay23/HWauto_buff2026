@@ -258,18 +258,9 @@ BridgeConfig load_config(const std::string &path) {
   BridgeConfig bc;
   const FlatConfig fs = parse_flat(path);
 
-  bc.algo.detector = (fs.gets("detector", "sp25") == "hw26") ? hw26_bridge::DetectorKind::kHw26
-                                                             : hw26_bridge::DetectorKind::kSp25;
+  // 检测后端不再从配置读：只写一个 model: 路径，Pipeline 按模型的输出形状判定
+  // （[1,5040,26]->HW26, [1,17,8400]->sp25），因此不可能出现"开关与路径不匹配"。
   bc.algo.model_path = fs.gets("model", bc.algo.model_path);
-  bc.algo.model_path_sp25 = fs.gets("model_sp25", bc.algo.model_path_sp25);
-  {
-    const size_t sl = path.find_last_of('/');
-    const std::string dir = (sl == std::string::npos) ? std::string(".") : path.substr(0, sl);
-    if (!bc.algo.model_path_sp25.empty() && bc.algo.model_path_sp25.front() != '/' &&
-        bc.algo.model_path_sp25.rfind("./", 0) != 0) {
-      bc.algo.model_path_sp25 = dir + "/" + bc.algo.model_path_sp25;
-    }
-  }
   bc.algo.blade_half_size = fs.getd("blade_half_size", bc.algo.blade_half_size);
   bc.algo.use_muzzle_offset = fs.getb("use_muzzle_offset", bc.algo.use_muzzle_offset);
   const auto mo = fs.lists.count("muzzle_offset") ? fs.lists.at("muzzle_offset") : std::vector<double>{};
@@ -278,10 +269,7 @@ BridgeConfig load_config(const std::string &path) {
     bc.algo.muzzle_offset[1] = mo[1];
     bc.algo.muzzle_offset[2] = mo[2];
   }
-  const std::string &need = (bc.algo.detector == hw26_bridge::DetectorKind::kSp25)
-                                ? bc.algo.model_path_sp25
-                                : bc.algo.model_path;
-  if (need.empty()) throw std::runtime_error("config: model path is required");
+  if (bc.algo.model_path.empty()) throw std::runtime_error("config: model path is required");
   // 相对路径按“配置文件所在目录”解析，避免依赖 CWD
   if (bc.algo.model_path.front() != '/') {
     const size_t slash = path.find_last_of('/');
@@ -753,13 +741,9 @@ int main(int argc, char **argv) {
     bc.algo.filter_activation = false;
   }
 
-  std::cout << "[bridge] config=" << cfg_path
-            << "  detector=" << (bc.algo.detector == hw26_bridge::DetectorKind::kSp25
-                                     ? "sp25" : "hw26")
-            << "\n"
-            << "[bridge] model="
-            << (bc.algo.detector == hw26_bridge::DetectorKind::kSp25 ? bc.algo.model_path_sp25
-                                                                     : bc.algo.model_path)
+  // 检测后端此刻还没判定（要等 Pipeline 构造时看模型的输出形状），所以这里只打路径
+  std::cout << "[bridge] config=" << cfg_path << "\n"
+            << "[bridge] model=" << bc.algo.model_path
             << "  blade_half=" << bc.algo.blade_half_size
             << "  muzzle_comp=" << (bc.algo.use_muzzle_offset ? "on" : "off") << "\n"
             << "[bridge] mode=" << bc.algo.buff_mode
@@ -799,7 +783,15 @@ int main(int argc, char **argv) {
     }
   }
 
-  if (selftest_aim) return run_selftest_aim(bc);
+  if (selftest_aim) {
+    if (bc.algo.buff_mode == 2) {
+      std::cout
+          << "[bridge] WARNING: --selftest-aim injects a STATIC blade phase, so the big-rune\n"
+             "         tracker can never converge its RANSAC sine fit and will never aim.\n"
+             "         Use mode: 1 (small rune) - it exercises exactly the same aim maths.\n";
+    }
+    return run_selftest_aim(bc);
+  }
 
   // ---- replay：视频回放，不需要模拟器 ----
   if (!replay.empty())

@@ -87,13 +87,16 @@ struct DetInfo {
 };
 
 struct Config {
-  DetectorKind detector = DetectorKind::kSp25;
-  // 模型与内参
-  std::string model_path;       // HW26 模型（detector=kHw26 时用）
-  std::string model_path_sp25;  // sp25 模型（detector=kSp25 时用）
-  // sp25 的物体点半边长（相对扇叶中心）。sp25 OBJECT_POINTS =
-  //   (0,0,0.827),(0,0.127,0.700),(0,0,0.573),(0,-0.127,0.700)
-  // -> 相对扇叶中心 (0,0,0.7) 为 (0,0,±h),(0,±h,0)，h = 0.127
+  // 检测后端。**不是从 yaml 读的**：由 Pipeline 构造函数按模型的输出形状自动判定，
+  // 所以配置里只写一个 model: 路径，不存在"开关与路径不匹配"的可能。
+  //   [1, 5040, 26] -> kHw26（9 关键点，分类 颜色 + 激活）
+  //   [1,   17, 8400] -> kSp25（6 关键点，单类）
+  DetectorKind detector = DetectorKind::kHw26;
+  // 模型路径（yaml 的 model:）
+  std::string model_path;
+  // 打击板四点的半边长（相对扇叶中心），(0,0,±h),(0,±h,0)。
+  // 两个模型的上/左/下/右四点指同一批物理点，所以共用。两个后端都走桥自实现的
+  // PnP，不调用 HW26 的 Solver（它的 BUFF_POINTS=0.114 在模拟器上距离偏 10%）。
   double blade_half_size = 0.127;
   // 模拟器给的枪口补偿（POWER_RUNE_INTERFACE.md:105）：
   //   枪口相对相机光心，云台系(X前 Y左 Z上)：前 73.83mm、右 1.08mm、下 28.48mm

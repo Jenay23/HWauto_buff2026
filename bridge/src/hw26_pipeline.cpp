@@ -78,6 +78,9 @@ cv::Point2f refine_r_center(const cv::Mat &bgr, const cv::Point2f &rough,
 
 constexpr int64_t kCandidateCount = 5040;
 constexpr int64_t kOutputColumns = 26;  // 4 + 4 + 9*2
+// sp25 的 yolo11_buff_int8：[1, 17, 8400]，17 = 4 bbox + 1 score + 6*2 kpt。
+// 用它把"配置里只写一个 model: 路径"变成可能：后端由输出形状判定。
+constexpr int64_t kSp25OutRows = 17;
 constexpr double kSimPitchLimit = 0.785;
 
 double wrap_pi(double a) {
@@ -245,28 +248,43 @@ Pipeline::Pipeline(const Config &cfg) : impl_(new Impl(cfg)) {
   }
   I.in_size = cv::Size(static_cast<int>(shp[3]), static_cast<int>(shp[2]));
   I.in_elems = shp[0] * shp[1] * shp[2] * shp[3];
-  I.compiled = I.core.compile_model(model, "CPU");
-  I.req = I.compiled.create_infer_request();
+
+  // ---- 检测后端由模型的输出形状自动判定（配置里只写一个 model:）----
+  const ov::Shape oshp = model->output().get_shape();
   {
-    const ov::Shape oshp = model->output().get_shape();
     std::ostringstream os;
     os << "[hw26] model in=" << shp[2] << "x" << shp[3] << " out=[";
     for (size_t i = 0; i < oshp.size(); ++i) os << (i ? "," : "") << oshp[i];
     os << "]";
     std::cout << os.str() << std::endl;
-    if (oshp.size() == 3 && static_cast<int64_t>(oshp[2]) != kOutputColumns) {
-      std::cerr << "[hw26] WARNING: output columns " << oshp[2] << " != expected "
-                << kOutputColumns << std::endl;
-    }
+  }
+  const int64_t out_rows = (oshp.size() == 3) ? static_cast<int64_t>(oshp[1]) : -1;
+  const int64_t out_cols = (oshp.size() == 3) ? static_cast<int64_t>(oshp[2]) : -1;
+  if (out_cols == kOutputColumns) {
+    I.cfg.detector = DetectorKind::kHw26;
+  } else if (out_rows == kSp25OutRows) {
+    I.cfg.detector = DetectorKind::kSp25;
+  } else {
+    std::ostringstream os;
+    os << "[hw26] FATAL: cannot tell which detector this model is from its output shape [";
+    for (size_t i = 0; i < oshp.size(); ++i) os << (i ? "," : "") << oshp[i];
+    os << "]. Expected HW26 [1," << kCandidateCount << "," << kOutputColumns
+       << "] or sp25 [1," << kSp25OutRows << ",N]. Check the model: line in bridge.yaml.";
+    throw std::runtime_error(os.str());
   }
 
-  if (cfg.detector == DetectorKind::kSp25) {
-    if (cfg.model_path_sp25.empty()) throw std::runtime_error("sp25 detector: model_path_sp25 is empty");
-    I.sp25_det = std::make_unique<Sp25Detector>(cfg.model_path_sp25);
-    std::cout << "[hw26] detector=sp25(" << cfg.model_path_sp25 << ") in=" << I.sp25_det->input_size().width
-              << "x" << I.sp25_det->input_size().height << std::endl;
+  if (I.cfg.detector == DetectorKind::kSp25) {
+    // Sp25Detector 自己会校验 [1,17,8400]，形状不对会抛
+    I.sp25_det = std::make_unique<Sp25Detector>(cfg.model_path);
+    std::cout << "[hw26] detector=sp25(" << cfg.model_path << ") in="
+              << I.sp25_det->input_size().width << "x" << I.sp25_det->input_size().height
+              << "  (6 keypoints, single class: no colour/activation info)" << std::endl;
   } else {
-    std::cout << "[hw26] detector=hw26(" << cfg.model_path << ")" << std::endl;
+    // 只在这个后端被选中时才编译模型（sp25 模式下不再白加载 38MB 的 HW26 模型）
+    I.compiled = I.core.compile_model(model, "CPU");
+    I.req = I.compiled.create_infer_request();
+    std::cout << "[hw26] detector=hw26(" << cfg.model_path
+              << ")  (9 keypoints, colour + activation classified)" << std::endl;
   }
 
   I.selector = std::make_unique<buff_algo::BuffSelector>(cfg.buff_color);
@@ -306,6 +324,22 @@ void Pipeline::clear_external_kpts() { impl_->ext_kpts.clear(); }
 
 int Pipeline::self_test_image(const cv::Mat &bgr) {
   auto &I = *impl_;
+
+  // 必须按选中的后端跑，否则 --selftest 永远只测 HW26 的模型，
+  // 两个后端会打印出逐位相同的"对比"结果（这个 bug 曾经存在过）。
+  if (I.cfg.detector == DetectorKind::kSp25) {
+    const std::optional<Sp25Detection> det = I.sp25_det->detect(bgr, I.cfg.confidence_threshold);
+    if (!det) {
+      std::cout << "  (sp25) no detection above threshold " << I.cfg.confidence_threshold
+                << std::endl;
+      return 0;
+    }
+    std::cout << "  (sp25) det conf=" << det->confidence << " max_score=" << det->max_score
+              << " kpt0=(" << det->kpt[0].x << "," << det->kpt[0].y << ")"
+              << " r_center=(" << det->r_center.x << "," << det->r_center.y << ")" << std::endl;
+    return 1;
+  }
+
   LetterboxInfo info;
   cv::Mat lb = buff_algo::letterbox_image(bgr, info, I.in_size);
   cv::Mat blob =
@@ -317,7 +351,7 @@ int Pipeline::self_test_image(const cv::Mat &bgr) {
   const float *out = I.req.get_output_tensor(0).data<const float>();
   auto det = buff_algo::decode_detections(out, kCandidateCount, kOutputColumns, info, I.dcfg);
   for (const auto &d : det) {
-    std::cout << "  det conf=" << d.detection.confidence << " label=" << d.detection.label
+    std::cout << "  (hw26) det conf=" << d.detection.confidence << " label=" << d.detection.label
               << " color=" << d.detection.color << " kpt0=(" << d.keypoints[0].x() << ","
               << d.keypoints[0].y() << ")" << std::endl;
   }
@@ -363,6 +397,83 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   I.last_kpt.clear();
   I.have_rcenter = false;
 
+  // ---- 统一的 PnP：两个检测后端共用 ----
+  // 刻意【不】调用 HW26 的 BuffPnPSolver：它内部写死 consts::BUFF_POINTS = 0.114，
+  // 那是 HW26 实车靶板的尺寸，用在模拟器上会让距离偏大约 10%（实测 10.18%，
+  // 而 0.127 只有 0.18%）。两个模型的上/左/下/右四点指同一批物理点，所以共用一套
+  // 物体点。双解消歧与首帧判据也集中在这一处，不要再写第二份。
+  const double h_plate = I.cfg.blade_half_size;
+  const std::vector<cv::Point3f> obj_plate = {
+      {0.f, 0.f, static_cast<float>(h_plate)},
+      {0.f, static_cast<float>(h_plate), 0.f},
+      {0.f, 0.f, static_cast<float>(-h_plate)},
+      {0.f, static_cast<float>(-h_plate), 0.f},
+  };
+  auto solve_pose_ippe = [&](const cv::Point2f &pt, const cv::Point2f &pl,
+                             const cv::Point2f &pb,
+                             const cv::Point2f &pr) -> std::optional<Pose3f> {
+    const std::vector<cv::Point2f> img = {pt, pl, pb, pr};
+    std::vector<cv::Mat> rvecs, tvecs;
+    std::vector<double> errs;
+    try {
+      cv::solvePnPGeneric(obj_plate, img, I.cfg.camera_matrix, I.cfg.distort_coeffs, rvecs,
+                          tvecs, false, cv::SOLVEPNP_IPPE, cv::noArray(), cv::noArray(), errs);
+    } catch (const cv::Exception &) {
+      return std::nullopt;
+    }
+    if (rvecs.empty()) return std::nullopt;
+
+    // 双解消歧：首帧取重投影误差小者；此后取与上一帧更连续者
+    int pick = 0;
+    if (rvecs.size() == 1) {
+      pick = 0;
+    } else if (!I.has_prev_pose) {
+      pick = (errs.size() >= 2 && errs[1] < errs[0]) ? 1 : 0;
+    } else {
+      // 连续性判据必须放在【静止系】里比较：这里用云台系，因为 prev 也在同一
+      // 瞬间的云台系里记录，两者一致。
+      double best = 1e18;
+      for (std::size_t k = 0; k < rvecs.size(); ++k) {
+        const Eigen::Vector3f t_c(static_cast<float>(tvecs[k].at<double>(0)),
+                                  static_cast<float>(tvecs[k].at<double>(1)),
+                                  static_cast<float>(tvecs[k].at<double>(2)));
+        cv::Mat Rm;
+        cv::Rodrigues(rvecs[k], Rm);
+        Eigen::Matrix3f Re;
+        for (int a = 0; a < 3; ++a)
+          for (int b = 0; b < 3; ++b) Re(a, b) = static_cast<float>(Rm.at<double>(a, b));
+        const Eigen::Vector3f t_g = R_cam2gim * t_c;
+        const Eigen::Quaternionf q(Eigen::Matrix3f(R_cam2gim * Re * R_cam2gim.transpose()));
+        const double dt = (t_g - I.prev_t).norm();
+        const double dq =
+            2.0 * std::acos(std::min(1.0, std::abs(static_cast<double>(q.dot(I.prev_q)))));
+        const double score = 2.0 * dt + dq;
+        if (score < best) {
+          best = score;
+          pick = static_cast<int>(k);
+        }
+      }
+    }
+    const Eigen::Vector3f t_cam(static_cast<float>(tvecs[pick].at<double>(0)),
+                                static_cast<float>(tvecs[pick].at<double>(1)),
+                                static_cast<float>(tvecs[pick].at<double>(2)));
+    cv::Mat Rm;
+    cv::Rodrigues(rvecs[pick], Rm);
+    Eigen::Matrix3f Re;
+    for (int a = 0; a < 3; ++a)
+      for (int b = 0; b < 3; ++b) Re(a, b) = static_cast<float>(Rm.at<double>(a, b));
+
+    Pose3f p;
+    p.translation = R_cam2gim * t_cam;                    // 相机系 -> 云台系
+    p.rotation = Eigen::Quaternionf(R_cam2gim * Re).normalized();
+    I.has_prev_pose = true;
+    I.prev_t = p.translation;   // 云台系
+    I.prev_q = p.rotation;      // 云台系
+    out.n_solutions = static_cast<int>(rvecs.size());
+    out.sol_pick = pick;
+    return p;
+  };
+
   if (I.cfg.detector == DetectorKind::kSp25) {
     std::optional<Sp25Detection> det;
     if (I.ext_kpts.size() >= 6) {
@@ -399,76 +510,31 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       }
       I.have_rcenter = true;
 
-      // sp25 的物体点（相对扇叶中心），顺序 上/左/下/右
-      const double h = I.cfg.blade_half_size;
-      const std::vector<cv::Point3f> obj = {
-          {0.f, 0.f, static_cast<float>(h)},
-          {0.f, static_cast<float>(h), 0.f},
-          {0.f, 0.f, static_cast<float>(-h)},
-          {0.f, static_cast<float>(-h), 0.f},
-      };
-      const std::vector<cv::Point2f> img = {det->kpt[0], det->kpt[1], det->kpt[2], det->kpt[3]};
-      std::vector<cv::Mat> rvecs, tvecs;
-      std::vector<double> errs;
-      try {
-        cv::solvePnPGeneric(obj, img, I.cfg.camera_matrix, I.cfg.distort_coeffs, rvecs, tvecs,
-                            false, cv::SOLVEPNP_IPPE, cv::noArray(), cv::noArray(), errs);
-      } catch (const cv::Exception &) {
-        rvecs.clear();
-      }
-      if (!rvecs.empty()) {
-        // 双解消歧：首帧取重投影误差小者；此后取与上一帧更连续者
-        int pick = 0;
-        if (rvecs.size() == 1) {
-          pick = 0;
-        } else if (!I.has_prev_pose) {
-          pick = (errs.size() >= 2 && errs[1] < errs[0]) ? 1 : 0;
-        } else {
-          // 连续性判据必须放在【静止系】里比较：这里用云台系，
-          // 因为 prev 也在同一瞬间的云台系里记录（见下方更新处），两者一致
-          double best = 1e18;
-          for (std::size_t k = 0; k < rvecs.size(); ++k) {
-            const Eigen::Vector3f t_c(static_cast<float>(tvecs[k].at<double>(0)),
-                                      static_cast<float>(tvecs[k].at<double>(1)),
-                                      static_cast<float>(tvecs[k].at<double>(2)));
-            cv::Mat Rm;
-            cv::Rodrigues(rvecs[k], Rm);
-            Eigen::Matrix3f Re;
-            for (int a = 0; a < 3; ++a)
-              for (int b = 0; b < 3; ++b) Re(a, b) = static_cast<float>(Rm.at<double>(a, b));
-            // 转到云台系再比较，消除"相机随云台转"造成的表观变化
-            const Eigen::Vector3f t_g = R_cam2gim * t_c;
-            const Eigen::Quaternionf q(Eigen::Matrix3f(R_cam2gim * Re * R_cam2gim.transpose()));
-            const double dt = (t_g - I.prev_t).norm();
-            const double dq =
-                2.0 * std::acos(std::min(1.0, std::abs(static_cast<double>(q.dot(I.prev_q)))));
-            const double score = 2.0 * dt + dq;
-            if (score < best) {
-              best = score;
-              pick = static_cast<int>(k);
-            }
-          }
-        }
-        const Eigen::Vector3f t_cam(static_cast<float>(tvecs[pick].at<double>(0)),
-                                    static_cast<float>(tvecs[pick].at<double>(1)),
-                                    static_cast<float>(tvecs[pick].at<double>(2)));
-        cv::Mat Rm;
-        cv::Rodrigues(rvecs[pick], Rm);
-        Eigen::Matrix3f Re;
-        for (int a = 0; a < 3; ++a)
-          for (int b = 0; b < 3; ++b) Re(a, b) = static_cast<float>(Rm.at<double>(a, b));
-
-        Pose3f p;
-        p.translation = R_cam2gim * t_cam;                       // 相机系 -> 云台系
-        p.rotation = Eigen::Quaternionf(R_cam2gim * Re).normalized();
-        poses.push_back(p);
-        I.has_prev_pose = true;
-        I.prev_t = p.translation;   // 云台系
-        I.prev_q = p.rotation;      // 云台系
-        out.n_solutions = static_cast<int>(rvecs.size());
-        out.sol_pick = pick;
+      // 走两个后端共用的 PnP（物体点 0.127，见本函数开头的 solve_pose_ippe）
+      if (const auto pose = solve_pose_ippe(det->kpt[0], det->kpt[1], det->kpt[2], det->kpt[3])) {
+        poses.push_back(*pose);
       }
     }
+  } else {
+  // 合成自检（--selftest-aim）注入的关键点：两个后端都必须支持。
+  // 之前这里只在 sp25 分支处理 ext_kpts，换成 HW26 后端后 self-test 会全部失败。
+  if (I.ext_kpts.size() >= 6) {
+    const cv::Point2f &pt = I.ext_kpts[0];
+    const cv::Point2f &pl = I.ext_kpts[1];
+    const cv::Point2f &pb = I.ext_kpts[2];
+    const cv::Point2f &pr = I.ext_kpts[3];
+    for (const auto &q : I.ext_kpts) I.last_kpt.push_back(q);
+    if (const auto pose = solve_pose_ippe(pt, pl, pb, pr)) poses.push_back(*pose);
+    DetInfo di;
+    di.color = I.cfg.buff_color;
+    di.label = 0;
+    di.confidence = 1.0f;
+    di.cx = pt.x;
+    di.cy = pt.y;
+    out.dets.push_back(di);
+    out.n_det = 1;
+    out.n_selected = 1;
+    out.max_score = 1.0f;
   } else {
   // 2) letterbox + blob（与 HW26 的 TensorRT 路径完全同构）
   LetterboxInfo info;
@@ -558,8 +624,19 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   }
   out.n_selected = static_cast<int>(selected.size());
 
-  // 5) PnP（HW26 后端）
-  poses = I.solver->solve_pnp(selected);
+  // 5) PnP：与 sp25 分支共用同一套（见本函数开头的 solve_pose_ippe，物体点 0.127）。
+  //    刻意不调用 I.solver->solve_pnp()：HW26 的 BuffPnPSolver 内部写死
+  //    consts::BUFF_POINTS = 0.114，那是它实车靶板的尺寸，用在模拟器上会让
+  //    距离偏大约 10%（实测 10.18% vs 0.127 的 0.18%）。
+  //    BuffDetection 的 t/l/b/r 与 sp25 的 kpt[0..3] 都是"上/左/下/右"同一批物理点。
+  for (const auto &b : selected) {
+    if (const auto pose =
+            solve_pose_ippe(cv::Point2f(b.t.x(), b.t.y()), cv::Point2f(b.l.x(), b.l.y()),
+                            cv::Point2f(b.b.x(), b.b.y()), cv::Point2f(b.r.x(), b.r.y()))) {
+      poses.push_back(*pose);
+    }
+  }
+  }  // end if ext_kpts ... else（合成自检 vs 真实推理）
   }  // end if detector==kSp25 ... else
 
   // 6) 观测系变换 + 质量闸 + 送入 Tracker
