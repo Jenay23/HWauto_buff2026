@@ -5,63 +5,56 @@
 #include <Eigen/Core>
 
 // ============================================================================
-// LocalRuneTracker —— 桥自己的"局部相位 tracker"（大符专用，独立于 HW26 的 tracker）
+// LocalRuneTracker —— 桥自己的"局部相位 tracker"（大符专用）
 // ============================================================================
 //
-// 为什么不直接用 HW26 的 tracker：
-//   1. HW26 用 RANSAC 拟合 v(t) = A*sin(w*t+phi) + C，要求内点数 >= min_inliers。
-//      它的每个假设只用 3 个点（最小样本）-> 3 个点的噪声直接进解 -> 需要很多很多
-//      点才能凑够内点。实测一次点亮窗口约 58 帧，仍然 ready 不了。
-//   2. 点亮窗口约 2.0 s < 正弦周期 2*pi/w ≈ 3.1~3.3 s，一次窗口只覆盖约 60% 个
-//      周期 -> (A, w, phi, C) 这 4 个参数在【信息上】就定不准。换算法也救不了。
+// 【可选四种估计器】由配置 local_model 切换（改配置即可，不用重编译）：
+//   0 = csine  ：官方约束模型 phase = theta0 + sgn*[(2.090-a)t + p(1-cos wt) + q sin wt]
+//                (a,w) 在官方边界内【网格搜索】+ 每帧重解线性部分 (theta0,p,q)
+//                离线实测（干净数据）227/341/455 ms 误差 2.30/3.69/5.09 度，最好
+//   1 = AR(p)  ：纯数据驱动 theta(t)=sum c_i theta(t-i)，系数最小二乘 + 递推多步
+//                离线实测干净数据 114 ms 0.5~0.75 度最好，长程变差
+//   2 = EKF    ：状态 [theta,a,w,phi]，过程用官方速度公式，观测 theta，带创新门
+//                注意：离线实测它【不好】—— 只测 theta 且窗口不足 1 周期时 a/w 不可辨识，
+//                它和批拟合撞同一堵墙。留在这里是为了对比，不建议作为主方案。
+//   3 = free   ：自由线性正弦 phase = c0 + c1*t + c2*sin(wt) + c3*cos(wt)（w 网格）
+//                c1 自由 -> 能适配任意转向，但会吸收噪声斜率 -> 会漂
 //
-// 本模块只做【短时外推】真正需要的事：把相位看成光滑函数，用滑动窗口的二次最小
-// 二乘同时估 (相位, 角速度, 角加速度)。只有 3 个未知数、窗口约 0.5 s ->
-// 条件数良态 -> 6~8 个样本即可用（对应点亮后约 0.2~0.3 s）。
-//
-// 精度依据：模拟器的规则给出 |角加速度| <= a*Omega <= 1.045*2.0 = 2.09 rad/s^2。
-// 二次模型外推 t 秒的截断误差约 0.5*|vdot|*t^2，外推 0.2 s 时约 0.04 rad (2.4 deg)。
-//
-// 注意：本模块只负责【相位】。转盘中心由调用方提供（桥已由两片位置联合解出）。
+// 共同点：只负责【相位】；转盘中心由调用方提供。
+// 为什么不用 HW26 的 tracker：见 README/提交历史（RANSAC 3 点最小样本 + 内点门，
+// 实测一次点亮窗口约 58 帧仍 ready 不了）。
 class LocalRuneTracker {
  public:
   void reset();
 
-  // 喂一个观测。roll 是【观测系】里的相位（rad），内部自动解缠，可以跨 ±pi。
+  // 喂一个观测。roll 是【观测系】里的相位（rad），内部自动解缠。
   void push(double t, double roll);
 
-  // 能不能用：三个门同时满足
-  //   1) 样本数 >= min_n（默认 12，约 0.4s）
-  //   2) 累计相位跨度 >= min_span_deg（默认 30 度）—— 跨度不够时，正弦项与线性项
-  //      几乎线性相关，二次拟合病态 -> 加速度被噪声放大 -> 外推乱跳
-  //   3) 拟合 RMS 残差 <= max_rms_deg（默认 2.5 度）—— 数据不自洽时宁可不给预测
-  // 实测教训：一开始只用 6 个样本就 ready，绿点很早就出现，但跟踪特别差。
-  bool ready() const {
-    // 已锁存正弦参数（残差够小过）+ 样本够 + 残差仍在门内
-    return locked_ != 0 && static_cast<int>(h_.size()) >= 4 && rms_deg_ >= 0.0 &&
-           rms_deg_ <= max_rms_deg_;
-  }
+  // 能不能用（不同模式判据不同）
+  bool ready() const;
   int n() const { return static_cast<int>(h_.size()); }
 
-  // 预测 t_future 时刻的相位，结果 wrap 到 (-pi, pi]。未 ready 时返回 false。
+  // 预测 t_future 时刻的相位（wrap 到 (-pi,pi]）。未 ready 返回 false。
   bool predict(double t_future, double *roll_out) const;
 
-  // 最近一次拟合得到的角速度 / 角加速度（诊断用；未 ready 时为 0）
+  // 诊断
   double velocity() const { return v_now_; }
-  double omega() const { return omega_; }
-  double amp() const { return amp_; }
-  bool locked() const { return locked_ != 0; }
   double accel() const { return a_now_; }
+  double omega() const { return omega_; }   // csine/free: 拟合的 w；EKF: 状态里的 w
+  double amp() const { return amp_; }       // csine: 拟合的 a；EKF: 状态里的 a
+  bool locked() const { return locked_ != 0; }
+  double rms_deg() const { return rms_deg_; }
+  double span_deg() const { return span_deg_; }
+  int ekf_rej() const { return ekf_rej_; }
+  int ekf_tot() const { return ekf_tot_; }
 
   void set_window(int n) { win_ = n; }
   void set_min_samples(int n) { min_n_ = n; }
   void set_min_span_deg(double d) { min_span_deg_ = d; }
   void set_max_rms_deg(double d) { max_rms_deg_ = d; }
   void set_ridge(double r) { ridge_ = r; }
-
-  // 诊断
-  double rms_deg() const { return rms_deg_; }
-  double span_deg() const { return span_deg_; }
+  void set_mode(int m) { mode_ = m; }
+  int mode() const { return mode_; }
 
  private:
   struct Sample {
@@ -69,32 +62,66 @@ class LocalRuneTracker {
     double roll;  // 解缠后的
   };
 
-  // 约束正弦模型：对固定 (a, w) 只有 3 个线性未知数 (theta0, p, q) -> 闭式最小二乘
+  // --- 通用 ---
+  void computeSpanAndDt();
+  double meanDt() const;
+
+  // --- mode 0: csine ---
   bool solveLinear(double a, double w, Eigen::Vector3d *coef, double *rms_rad);
-  // 网格搜 (a, w) 取残差最小者，并锁住形状
   void refitShape();
+
+  // --- mode 3: free linear sine ---
+  bool fitFree(Eigen::Vector4d *coef, double *w_out, double *t_ref_out);
+
+  // --- mode 1: AR ---
+  void fitAR();  // 更新 ar_c_
+
+  // --- mode 2: EKF（手写 4x4）---
+  void ekfStep(double z);
+  bool ekfReady() const;
 
   std::deque<Sample> h_;
   double last_raw_ = 0.0;
   double last_unwrapped_ = 0.0;
   bool have_last_ = false;
+  int mode_ = 0;
   int win_ = 20;          // 约 0.6 s @30fps
-  int min_n_ = 12;        // 约 0.4 s —— 实测 6 个太少，预测乱跳
+  int min_n_ = 12;
   double min_span_deg_ = 30.0;
   double max_rms_deg_ = 2.5;
-  // ridge：对 (速度, 加速度) 加小惩罚，数据撑不住时自动退化成"匀速外推"
   double ridge_ = 1e-3;
   double v_now_ = 0.0;
   double a_now_ = 0.0;
-  // --- 形状锁存：(a, w) 锁住，(theta0,p,q) 每帧重解 ---
-  int locked_ = 0;                                    // 形状是否已锁定
-  double lock_a_ = 0.0;                               // 锁定的 a
-  double lock_w_ = 0.0;                               // 锁定的 omega
-  Eigen::Vector3d lin_c_ = Eigen::Vector3d::Zero();   // 每帧重解的 (theta0, p, q)
-  double t_ref_ = 0.0;                                // 当前窗口的时间原点
-  double sgn_ = 1.0;                                  // 转向符号（由窗口斜率定出）
-  double omega_ = 0.0;                                // 诊断：最近拟合的 omega
-  double amp_ = 0.0;                                  // 诊断：最近拟合的 a
+  double omega_ = 0.0;
+  double amp_ = 0.0;
   double rms_deg_ = -1.0;
   double span_deg_ = 0.0;
+  double dt_ema_ = 1.0 / 30.0;
+
+  // csine
+  int locked_ = 0;
+  double lock_a_ = 0.0;
+  double lock_w_ = 0.0;
+  Eigen::Vector3d lin_c_ = Eigen::Vector3d::Zero();
+  double t_ref_ = 0.0;
+  double sgn_ = 1.0;
+
+  // free
+  int free_locked_ = 0;
+  Eigen::Vector4d free_c_ = Eigen::Vector4d::Zero();
+  double free_w_ = 0.0;
+  double free_t_ref_ = 0.0;
+
+  // AR
+  int ar_p_ = 4;
+  std::deque<double> ar_c_;
+
+  // EKF: x = [theta, a, w, phi]
+  double ex_[4] = {0, 0.9, 1.94, 0.0};
+  double eP_[4][4] = {{0}};
+  double etau_ = 0.0;
+  int ekf_init_ = 0;
+  int ekf_rej_ = 0;
+  int ekf_tot_ = 0;
+  int ekf_miss_ = 0;
 };

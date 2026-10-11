@@ -137,6 +137,7 @@ struct Config {
   // 打开后：即使 HW26 的 tracker 还没到 TRACKING（st=0），只要局部拟合够样本
   // （默认 6 个，约 0.2~0.3 s）就能给出预测命中点。HW26 到 TRACKING 后仍优先用它。
   int local_tracker = 1;
+  int local_model = 0;   // 0=csine 1=AR 2=EKF 3=free
 
   // 弹道 / 瞄准
   double bullet_speed = 22.0;      // 模拟器弹速

@@ -109,6 +109,12 @@ phase_ma_n: 6
 # （约 0.2~0.3 s），不受 HW26 RANSAC 需要 35 个内点的限制。
 # HW26 到 TRACKING 之后仍然优先用它的 predictor。
 local_tracker: 1
+# 局部估计器选择（改这里即可切换，不用重编译）
+#   0 = csine（官方约束模型，(a,w) 网格搜索；离线实测干净数据下多步预测最好）
+#   1 = AR(4)（纯数据驱动，短程最好）
+#   2 = EKF（状态 [theta,a,w,phi]；离线实测不好，留作对比）
+#   3 = free（自由线性正弦；能拟合但会漂，兜底用）
+local_model: 0
 
 # ---- 弹道 / 瞄准 ----
 bullet_speed: 22.0          # 模拟器弹速 m/s

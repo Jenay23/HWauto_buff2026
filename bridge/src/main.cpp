@@ -300,6 +300,8 @@ BridgeConfig load_config(const std::string &path) {
   bc.algo.dual_target = fs.getb("dual_target", true);
   bc.algo.phase_ma_n = static_cast<int>(fs.getd("phase_ma_n", bc.algo.phase_ma_n));
   bc.algo.local_tracker = static_cast<int>(fs.getd("local_tracker", bc.algo.local_tracker));
+  bc.algo.local_model =
+      static_cast<int>(fs.getd("local_model", bc.algo.local_model));
   bc.algo.bullet_speed = fs.getd("bullet_speed", 22.0);
   bc.algo.gravity = fs.getd("gravity", 9.81);
   bc.algo.yaw_offset_deg = fs.getd("yaw_offset_deg", 0.0);
@@ -749,7 +751,8 @@ int main(int argc, char **argv) {
   // 检测后端此刻还没判定（要等 Pipeline 构造时看模型的输出形状），所以这里只打路径
   std::cout << "[bridge] config=" << cfg_path << "\n"
             << "[bridge] model=" << bc.algo.model_path
-            << "  blade_half=" << bc.algo.blade_half_size
+            << "  local_model=" << bc.algo.local_model << "\n" <<
+            "  blade_half=" << bc.algo.blade_half_size
             << "/" << bc.algo.blade_half_size_hw26
             << "  muzzle_comp=" << (bc.algo.use_muzzle_offset ? "on" : "off") << "\n"
             << "[bridge] mode=" << bc.algo.buff_mode
