@@ -934,6 +934,21 @@ int main(int argc, char **argv) {
             out.rc_dist_m);
         std::fflush(stdout);
       }
+      // 组号/身份诊断：每帧一行（有检出时）。判定方法：
+      //   p0a 在跳                -> A/B 翻了，绿点其实也在跳
+      //   p0a 稳但 sa/sb 在跳      -> 组号映射在变
+      //   两者都稳而画面还变        -> 变的是别的东西（顶点顺序 / 绘制）
+      if (out.n_det > 0) {
+        std::printf(
+            "[grp] nt=%d ndet=%d nsel=%d nk=%zu p0a=%d sa=%d sb=%d conf=(%.2f,%.2f) "
+            "g0=(%.0f,%.0f) g1=(%.0f,%.0f) ra=%.3f rb=%.3f rca=%.2f rcb=%.2f\n",
+            out.dual_targets, out.n_det, out.n_selected, out.det_kpts.size(), out.dbg_pose0_is_a,
+            out.dbg_src_a, out.dbg_src_b, out.dbg_conf0, out.dbg_conf1, out.dbg_g0x, out.dbg_g0y,
+            out.dbg_g1x, out.dbg_g1y, out.dbg_roll_a, out.dbg_roll_b, out.dbg_rca_m,
+            out.dbg_rcb_m);
+        std::fflush(stdout);
+      }
+
       // 大符专项诊断（限流）：用来定位"黄/品红为什么还在换"。
       //   droll = 本帧两片 roll 与上一帧两片 roll 做【不依赖身份】最优配对后的两个残差。
       //           某一对接近 180 度 => 那片发生了 IPPE 双解翻转（相位翻到对面）。

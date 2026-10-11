@@ -677,8 +677,12 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       selected.push_back(dets[i]);
       selected_src.push_back(i);
     }
+    if (!selected.empty()) out.dbg_conf0 = static_cast<double>(selected[0].confidence);
+    if (selected.size() >= 2) out.dbg_conf1 = static_cast<double>(selected[1].confidence);
   } else if (I.cfg.filter_color && I.cfg.filter_activation) {
     I.selector->select_buffs(dets, selected);  // HW26 原逻辑（小符：只保留 1 个）
+    if (!selected.empty()) out.dbg_conf0 = static_cast<double>(selected[0].confidence);
+    if (selected.size() >= 2) out.dbg_conf1 = static_cast<double>(selected[1].confidence);
   } else {
     // 放宽过滤（诊断用）：按开启的条件筛选，再取"光轴夹角最小"的一个
     static const std::vector<cv::Point3f> obj_pts = [] {
@@ -959,6 +963,9 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       const std::size_t src_b = pose_src.size() >= 2
                                     ? (pose0_is_a ? pose_src[1] : pose_src[0])
                                     : 1;
+      out.dbg_pose0_is_a = pose0_is_a ? 1 : 0;
+      out.dbg_src_a = static_cast<int>(src_a);
+      out.dbg_src_b = static_cast<int>(src_b);
       const double step = 2.0 * M_PI / 5.0;
       const double d = wrap_pi(static_cast<double>(B.roll) - static_cast<double>(A.roll));  // >= 0
       int k = static_cast<int>(std::lround(d / step));
@@ -975,6 +982,11 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       obs = A;
       out.dual_targets = 2;
       out.dual_delta_deg = delta * 180.0 / M_PI;
+      // 诊断：融合【前】的原始相位 + 各自的 R_center 距离
+      out.dbg_roll_a = static_cast<double>(A.roll);
+      out.dbg_roll_b = static_cast<double>(B.roll);
+      out.dbg_rca_m = static_cast<double>(A.R_center.norm());
+      out.dbg_rcb_m = static_cast<double>(B.R_center.norm());
       cur_rolls = {A.roll, B.roll};
       out.meas_a_valid = true;
       out.meas_b_valid = true;
@@ -1028,6 +1040,19 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       double acc = 0.0;
       for (double v : I.roll_hist) acc += v;
       obs.roll = static_cast<float>(wrap_pi(acc / static_cast<double>(I.roll_hist.size())));
+    }
+    // 诊断：重排后组 0 / 组 1 的关键点质心（图像像素），以及两组置信度
+    if (!out.det_kpts.empty() && !out.det_kpts[0].empty()) {
+      double sx = 0.0, sy = 0.0;
+      for (const auto &q : out.det_kpts[0]) { sx += q.x; sy += q.y; }
+      out.dbg_g0x = sx / static_cast<double>(out.det_kpts[0].size());
+      out.dbg_g0y = sy / static_cast<double>(out.det_kpts[0].size());
+    }
+    if (out.det_kpts.size() >= 2 && !out.det_kpts[1].empty()) {
+      double sx = 0.0, sy = 0.0;
+      for (const auto &q : out.det_kpts[1]) { sx += q.x; sy += q.y; }
+      out.dbg_g1x = sx / static_cast<double>(out.det_kpts[1].size());
+      out.dbg_g1y = sy / static_cast<double>(out.det_kpts[1].size());
     }
     if (dis_ok) I.tracker->push(obs);
 
