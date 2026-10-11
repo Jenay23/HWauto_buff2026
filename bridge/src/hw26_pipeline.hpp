@@ -133,6 +133,10 @@ struct Config {
   // 先平滑再喂，噪声降 sqrt(N)。N=6 时预计内点数 ~34~45。
   // 代价：滞后 (N-1)/2 帧，预测时要补回去（见 base_lead）。
   int phase_ma_n = 6;
+  // 大符用桥自己的【局部相位 tracker】做短时外推（见 src/local_tracker.hpp）。
+  // 打开后：即使 HW26 的 tracker 还没到 TRACKING（st=0），只要局部拟合够样本
+  // （默认 6 个，约 0.2~0.3 s）就能给出预测命中点。HW26 到 TRACKING 后仍优先用它。
+  int local_tracker = 1;
 
   // 弹道 / 瞄准
   double bullet_speed = 22.0;      // 模拟器弹速
@@ -219,6 +223,11 @@ struct Output {
   //   隔一槽位(144 度) 应为 2*0.7*sin(72) = 1.331 m
   // 它与 dlt 是否一致，是判断"两片确实固连在同一转盘上"的直接证据。
   double chord_m = -1.0;
+  // 桥自己的局部相位 tracker 的诊断：样本数 / 是否 ready / 角速度 / 角加速度
+  int local_n = 0;
+  int local_ready = 0;
+  double local_w = 0.0;
+  double local_a = 0.0;
   // ---- 可视化用（全部在【车体系】，方便直接喂 project_px）----
   // 关键：两片的实测板心要【分开】留着，否则看不出是哪一片坏了/被平均了
   bool meas_a_valid = false;

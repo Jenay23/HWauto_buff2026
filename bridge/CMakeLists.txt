@@ -54,6 +54,7 @@ add_executable(hw26_sim_bridge
   src/main.cpp
   src/hw26_pipeline.cpp
   src/detector_sp25.cpp
+  src/local_tracker.cpp
   ${HW26_SOURCES}
 )
 target_include_directories(hw26_sim_bridge PRIVATE

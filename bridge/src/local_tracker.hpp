@@ -1,0 +1,64 @@
+#pragma once
+
+#include <deque>
+
+#include <Eigen/Core>
+
+// ============================================================================
+// LocalRuneTracker —— 桥自己的"局部相位 tracker"（大符专用，独立于 HW26 的 tracker）
+// ============================================================================
+//
+// 为什么不直接用 HW26 的 tracker：
+//   1. HW26 用 RANSAC 拟合 v(t) = A*sin(w*t+phi) + C，要求内点数 >= min_inliers。
+//      它的每个假设只用 3 个点（最小样本）-> 3 个点的噪声直接进解 -> 需要很多很多
+//      点才能凑够内点。实测一次点亮窗口约 58 帧，仍然 ready 不了。
+//   2. 点亮窗口约 2.0 s < 正弦周期 2*pi/w ≈ 3.1~3.3 s，一次窗口只覆盖约 60% 个
+//      周期 -> (A, w, phi, C) 这 4 个参数在【信息上】就定不准。换算法也救不了。
+//
+// 本模块只做【短时外推】真正需要的事：把相位看成光滑函数，用滑动窗口的二次最小
+// 二乘同时估 (相位, 角速度, 角加速度)。只有 3 个未知数、窗口约 0.5 s ->
+// 条件数良态 -> 6~8 个样本即可用（对应点亮后约 0.2~0.3 s）。
+//
+// 精度依据：模拟器的规则给出 |角加速度| <= a*Omega <= 1.045*2.0 = 2.09 rad/s^2。
+// 二次模型外推 t 秒的截断误差约 0.5*|vdot|*t^2，外推 0.2 s 时约 0.04 rad (2.4 deg)。
+//
+// 注意：本模块只负责【相位】。转盘中心由调用方提供（桥已由两片位置联合解出）。
+class LocalRuneTracker {
+ public:
+  void reset();
+
+  // 喂一个观测。roll 是【观测系】里的相位（rad），内部自动解缠，可以跨 ±pi。
+  void push(double t, double roll);
+
+  // 样本数够不够（默认 6 个）
+  bool ready() const { return static_cast<int>(h_.size()) >= min_n_; }
+  int n() const { return static_cast<int>(h_.size()); }
+
+  // 预测 t_future 时刻的相位，结果 wrap 到 (-pi, pi]。未 ready 时返回 false。
+  bool predict(double t_future, double *roll_out) const;
+
+  // 最近一次拟合得到的角速度 / 角加速度（诊断用；未 ready 时为 0）
+  double velocity() const { return v_now_; }
+  double accel() const { return a_now_; }
+
+  void set_window(int n) { win_ = n; }
+  void set_min_samples(int n) { min_n_ = n; }
+
+ private:
+  struct Sample {
+    double t;
+    double roll;  // 解缠后的
+  };
+
+  // 以最后一个样本为时间原点做二次最小二乘，返回系数 (a0, a1, a2)
+  bool fit(Eigen::Vector3d *coef, double *t_ref) const;
+
+  std::deque<Sample> h_;
+  double last_raw_ = 0.0;
+  double last_unwrapped_ = 0.0;
+  bool have_last_ = false;
+  int win_ = 15;    // 约 0.5 s @30fps
+  int min_n_ = 6;
+  double v_now_ = 0.0;
+  double a_now_ = 0.0;
+};

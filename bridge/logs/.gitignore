@@ -1,0 +1,2 @@
+# 每次运行的 log 不进 git（用 record.sh 生成）
+*.log

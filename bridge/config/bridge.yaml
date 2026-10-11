@@ -104,6 +104,12 @@ dual_target: 1
 # 1 = 关闭
 phase_ma_n: 6
 
+# 大符用桥自己的【局部相位 tracker】做短时外推（src/local_tracker.hpp）。
+# 它只估 3 个数（相位/角速度/角加速度），滑动窗口二次最小二乘，6~8 个样本即可用
+# （约 0.2~0.3 s），不受 HW26 RANSAC 需要 35 个内点的限制。
+# HW26 到 TRACKING 之后仍然优先用它的 predictor。
+local_tracker: 1
+
 # ---- 弹道 / 瞄准 ----
 bullet_speed: 22.0          # 模拟器弹速 m/s
 gravity: 9.81

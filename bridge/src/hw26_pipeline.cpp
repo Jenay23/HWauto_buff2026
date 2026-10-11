@@ -1,5 +1,7 @@
 #include "hw26_pipeline.hpp"
 
+#include "local_tracker.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -239,6 +241,7 @@ struct Pipeline::Impl {
   double prev_frame_t = 0.0;
   bool have_prev_frame_t = false;
   double dt_frame_ema = 0.033;
+  LocalRuneTracker local_trk;   // 桥自己的局部相位 tracker（大符）
   // 由两片位置联合解出的圆心（符面系）。圆心是固定点，所以它的连续性极可靠，
   // 可以用来在"中垂线两支解"里选正确的那支。
   Eigen::Vector3f center_face = Eigen::Vector3f::Zero();
@@ -990,6 +993,16 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
         out.det_kpts = std::move(ordered);
       }
     }
+    // 6f-0b) 喂桥自己的局部相位 tracker（用【滤波前】的原始相位：
+    //        它内部本来就是滑动窗口最小二乘，会自己平滑；喂平滑过的会叠加滞后）。
+    if (I.cfg.local_tracker) {
+      I.local_trk.push(t_rel, static_cast<double>(obs.roll));
+      out.local_n = I.local_trk.n();
+      out.local_ready = I.local_trk.ready() ? 1 : 0;
+      out.local_w = I.local_trk.velocity();
+      out.local_a = I.local_trk.accel();
+    }
+
     // 6f-1) 相位低通（滑动平均 N 帧，解缠后平均）。目的见 Config::phase_ma_n 注释。
     //       只在连续有观测的帧之间累计；一旦断帧（det=0）就清空，避免跨窗口平均。
     if (I.cfg.phase_ma_n > 1) {
@@ -1035,6 +1048,7 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   if (out.dual_targets == 0) {
     I.roll_hist.clear();
     I.have_last_roll = false;
+    I.local_trk.reset();   // 局部模型只对【连续】的一段负责
   }
 
   // 7) 状态机推进（无论本帧是否有观测都要 update，与 HW26 example 一致）
@@ -1070,7 +1084,9 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   Eigen::Vector3f aim_pt = Eigen::Vector3f::Zero();
   bool aim_valid = false;
 
-  if (out.solved && trackable) {
+  const bool local_usable =
+      (I.cfg.local_tracker != 0) && I.local_trk.ready() && I.have_center;
+  if (out.solved && (trackable || local_usable)) {
     const double alg_lag =
         (I.cfg.alg_latency > 0.0) ? I.cfg.alg_latency : I.last_latency_ms / 1000.0;
     // 相位滤波带来的滞后：滑动平均 N 帧 -> 相位代表的是 (N-1)/2 帧之前的时刻，
@@ -1101,7 +1117,21 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
 
     lead = base_lead;
     for (int it = 0; it < 5; ++it) {
-      aim_pt = I.predictor->predict_position(static_cast<float>(lead));
+      // 预测命中点：HW26 到 TRACKING 就用它的 predictor（4 参数正弦外推）；
+      // 否则用桥自己的局部 tracker（相位二次外推，6~8 个样本即可用）。
+      if (out.status == static_cast<int>(StatusType::TRACKING)) {
+        aim_pt = I.predictor->predict_position(static_cast<float>(lead));
+      } else {
+        double roll_pred = 0.0;
+        if (!I.local_trk.predict(t_rel + lead, &roll_pred)) {
+          aim_valid = false;
+          break;
+        }
+        const float R = buff_algo::consts::BUFF_RADIUS;
+        aim_pt.x() = I.center_face.x();
+        aim_pt.y() = I.center_face.y() - R * std::cos(static_cast<float>(roll_pred));
+        aim_pt.z() = I.center_face.z() + R * std::sin(static_cast<float>(roll_pred));
+      }
       const Eigen::Vector3f p_ch = to_chassis(aim_pt);
       const double d = std::hypot(static_cast<double>(p_ch.x()), static_cast<double>(p_ch.y()));
       const double hgt = static_cast<double>(p_ch.z());
