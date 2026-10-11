@@ -127,7 +127,8 @@ max_distance: 15.0
 fire_enabled: 1
 fire_err_rad: 0.02          # 云台到位残差门（与 ④ 一致）
 fire_stable_frames: 3
-fire_cooldown: 1.0
+fire_cooldown: 0.5           # 0.5 s（原来 1.0）。大符的二次打击窗口只有 1.0 s，
+                             # 冷却必须明显小于它，才有机会在窗口内打第二片。
 
 # ---- 其它 ----
 # 观测参考系：
