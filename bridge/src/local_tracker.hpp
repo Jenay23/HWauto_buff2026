@@ -69,9 +69,10 @@ class LocalRuneTracker {
     double roll;  // 解缠后的
   };
 
-  // 正弦模型拟合：phase(t) = c0 + c1*t + c2*sin(w t) + c3*cos(w t)
-  // 对固定 w 线性，闭式最小二乘；w 在 [1.884,2.000] 网格搜索取残差最小者。
-  bool fit(Eigen::Vector4d *coef, double *omega_out, double *t_ref_out);
+  // 约束正弦模型：对固定 (a, w) 只有 3 个线性未知数 (theta0, p, q) -> 闭式最小二乘
+  bool solveLinear(double a, double w, Eigen::Vector3d *coef, double *rms_rad);
+  // 网格搜 (a, w) 取残差最小者，并锁住形状
+  void refitShape();
 
   std::deque<Sample> h_;
   double last_raw_ = 0.0;
@@ -85,13 +86,14 @@ class LocalRuneTracker {
   double ridge_ = 1e-3;
   double v_now_ = 0.0;
   double a_now_ = 0.0;
-  // --- 正弦模型锁存 ---
-  int locked_ = 0;                                  // 参数是否已锁存
-  Eigen::Vector4d lock_c_ = Eigen::Vector4d::Zero();  // c0..c3
-  double lock_w_ = 0.0;                             // 锁存的 omega
-  double lock_t_ref_ = 0.0;                         // 锁存时的时间原点
-  double omega_ = 0.0;                              // 最近一次拟合的 omega（诊断）
-  double amp_ = 0.0;                                // 角速度振幅 a（诊断）
+  // --- 形状锁存：(a, w) 锁住，(theta0,p,q) 每帧重解 ---
+  int locked_ = 0;                                    // 形状是否已锁定
+  double lock_a_ = 0.0;                               // 锁定的 a
+  double lock_w_ = 0.0;                               // 锁定的 omega
+  Eigen::Vector3d lin_c_ = Eigen::Vector3d::Zero();   // 每帧重解的 (theta0, p, q)
+  double t_ref_ = 0.0;                                // 当前窗口的时间原点
+  double omega_ = 0.0;                                // 诊断：最近拟合的 omega
+  double amp_ = 0.0;                                  // 诊断：最近拟合的 a
   double rms_deg_ = -1.0;
   double span_deg_ = 0.0;
 };
