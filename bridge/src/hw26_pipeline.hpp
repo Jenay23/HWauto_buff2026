@@ -115,6 +115,12 @@ struct Config {
   // 是否启用 HW26 Selector 的两道过滤（关掉可用于诊断"检出但被过滤"）
   bool filter_color = true;
   bool filter_activation = true;
+  // 双靶标（大符专用）：大符同时高亮 2 个靶标，HW26 的 selector 只会保留 1 个，
+  // 而两靶标在转盘上交替"离光轴更近" -> 相位每帧跳 72° -> 超过 switch_buff_angle
+  // (45.8°) 的跳变判据 -> 该帧被丢弃 -> RANSAC 永远拿不到数据 -> st 卡在 CONVERGING。
+  // 打开后桥自己保留两个候选，并利用"它们刚性固连在同一个转盘上、相位差是常数
+  // (72° 的整数倍)"这一点，把两次观测融合成同一个三角函数体系下的一次观测。
+  bool dual_target = true;
 
   // 弹道 / 瞄准
   double bullet_speed = 22.0;      // 模拟器弹速
@@ -185,6 +191,14 @@ struct Output {
   double face_ex = 0.0;       // 面系下径向矢量出平面分量 |e.x|（应≈0，验证面系成立）
   double face_tilt_deg = 0.0;
   double reproj_px = -1.0;
+  // 双靶标诊断
+  int dual_targets = 0;         // 本帧融入了几个靶标（大符正常 = 2）
+  double dual_delta_deg = 0.0;  // 吸附后的相位差 Δ（应为 72 或 144 度）
+  // |R_center|：到【转盘中心】的距离。它与转盘的相位无关（转盘中心是固定点），
+  // 所以是标定 blade_half_size 的理想判据：
+  //     h_true = blade_half_size * rc_true / rc_measured
+  // （reproj 查不出尺度错误：平面靶标的 PnP 有尺度不可分辨性）
+  double rc_dist_m = -1.0;
   int n_solutions = 0;        // IPPE 给出的解个数
   int sol_pick = -1;          // 本帧选了哪一个
   double cmd_jump_deg = 0.0;

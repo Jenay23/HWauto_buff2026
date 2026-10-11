@@ -295,6 +295,7 @@ BridgeConfig load_config(const std::string &path) {
   bc.algo.nms_threshold = static_cast<float>(fs.getd("nms_threshold", 0.4));
   bc.algo.filter_color = fs.getb("filter_color", true);
   bc.algo.filter_activation = fs.getb("filter_activation", true);
+  bc.algo.dual_target = fs.getb("dual_target", true);
   bc.algo.bullet_speed = fs.getd("bullet_speed", 22.0);
   bc.algo.gravity = fs.getd("gravity", 9.81);
   bc.algo.yaw_offset_deg = fs.getd("yaw_offset_deg", 0.0);
@@ -919,11 +920,13 @@ int main(int argc, char **argv) {
       if (fire || out.n_det != 1 || k % 30 == 0) {
         std::printf(
             "[bridge] #%llu age=%.0fms det=%d sel=%d solved=%d q=%d st=%d dis=%.2f "
-            "roll=%.3f w=%.3f lead=%.3f lat=%.1fms cmd=(%.2f,%.2f) err=%.4f ctrl=%d fire=%d\n",
+            "roll=%.3f w=%.3f lead=%.3f lat=%.1fms cmd=(%.2f,%.2f) err=%.4f ctrl=%d fire=%d "
+            "nt=%d dlt=%.0f rc=%.2f\n",
             static_cast<unsigned long long>(k), age_ms, out.n_det, out.n_selected,
             out.solved ? 1 : 0, out.quality ? 1 : 0, out.status, out.buff_dis, out.roll,
             out.roll_velocity, out.lead_s, out.latency_ms, yaw * 180 / M_PI, pitch * 180 / M_PI,
-            out.fire_err, control ? 1 : 0, fire ? 1 : 0);
+            out.fire_err, control ? 1 : 0, fire ? 1 : 0, out.dual_targets, out.dual_delta_deg,
+            out.rc_dist_m);
         std::fflush(stdout);
       }
       if (max_frames > 0 && static_cast<int>(k) >= max_frames) {

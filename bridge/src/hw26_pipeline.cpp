@@ -582,8 +582,30 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   dets.reserve(detected.size());
   for (const auto &d : detected) dets.push_back(d.detection);
   std::vector<BuffDetection> selected;
-  if (I.cfg.filter_color && I.cfg.filter_activation) {
-    I.selector->select_buffs(dets, selected);  // HW26 原逻辑
+  if (I.cfg.dual_target) {
+    // 双靶标：桥自己筛，保留【所有】通过颜色+激活过滤的候选（大符有 2 个）。
+    // 不用 HW26 的 select_buffs —— 它结尾写死 dst.push_back(infos[0].buff)，
+    // 只保留"离光轴最近"的 1 个。大符两片靶标都在转，谁更近会来回切换 ->
+    // 相位每帧跳 72° -> 超过 switch_buff_angle(45.8°) -> BigBuffObserver 把
+    // 每一帧都判成"换片"丢弃 -> RANSAC 永远拿不到数据 -> st 卡在 CONVERGING
+    // -> ctrl 恒为 0（完全不瞄准）。这就是实测日志里的现象。
+    for (const auto &b : dets) {
+      if (I.cfg.filter_color && b.color != I.cfg.buff_color) continue;
+      if (I.cfg.filter_activation &&
+          b.label != static_cast<int>(buff_algo::BuffActivation::INACTIVATE))
+        continue;
+      selected.push_back(b);
+    }
+    // 大符最多高亮 2 片，多于 2 个时按置信度取前 2（第 3 个通常是假阳）
+    if (selected.size() > 2) {
+      std::partial_sort(selected.begin(), selected.begin() + 2, selected.end(),
+                        [](const BuffDetection &x, const BuffDetection &y) {
+                          return x.confidence > y.confidence;
+                        });
+      selected.resize(2);
+    }
+  } else if (I.cfg.filter_color && I.cfg.filter_activation) {
+    I.selector->select_buffs(dets, selected);  // HW26 原逻辑（小符：只保留 1 个）
   } else {
     // 放宽过滤（诊断用）：按开启的条件筛选，再取"光轴夹角最小"的一个
     static const std::vector<cv::Point3f> obj_pts = [] {
@@ -677,13 +699,16 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
     I.R_chassis_face = Rc2f.transpose();  // 符面系 -> 车体系
     ++I.face_frames;
 
-    // 6d) 观测转到所选参考系
-    Pose3f use;
-    if (I.cfg.frame == RefFrame::kFace) {
-      // 强制扇叶局部 z 轴落在面内（其 x 分量置 0），使 e = R*(0,0,-0.7) 的
-      // x 分量【精确】为 0 —— 这样 HW26 的固定平面重建才完全精确
-      {
-        Eigen::Matrix3f Rb_face = Rc2f * Rb_chassis;
+    // 6d) 观测转到所选参考系。抽成 lambda：两个靶标共用同一套变换
+    //     （面系由转盘法向决定，与是哪个靶标无关）。
+    auto to_obs = [&](const Pose3f &q) -> Pose3f {
+      Pose3f o;
+      if (I.cfg.frame == RefFrame::kFace) {
+        // 强制扇叶局部 z 轴落在面内（其 x 分量置 0），使 e = R*(0,0,-0.7) 的
+        // x 分量【精确】为 0 —— 这样 HW26 的固定平面重建才完全精确
+        const Eigen::Vector3f t_ch = R_cg * q.translation;
+        const Eigen::Matrix3f Rb_ch = R_cg * q.rotation.toRotationMatrix();
+        Eigen::Matrix3f Rb_face = Rc2f * Rb_ch;
         Eigen::Vector3f lz = Rb_face.col(2);
         lz.x() = 0.f;
         if (lz.norm() < 1e-3f) lz = Eigen::Vector3f(0.f, 1.f, 0.f);
@@ -695,23 +720,25 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
         Rfix.col(0) = lx;
         Rfix.col(1) = ly;
         Rfix.col(2) = lz;
-        use.translation = Rc2f * t_chassis;
-        use.rotation = Eigen::Quaternionf(Rfix).normalized();
+        o.translation = Rc2f * t_ch;
+        o.rotation = Eigen::Quaternionf(Rfix).normalized();
+      } else if (I.cfg.frame == RefFrame::kChassis) {
+        o.translation = R_cg * q.translation;
+        o.rotation = Eigen::Quaternionf(R_cg * q.rotation.toRotationMatrix()).normalized();
+      } else {  // kGimbal：故意保留以复现自激
+        o = q;
       }
+      return o;
+    };
+    Pose3f use = to_obs(p);
+    if (I.cfg.frame == RefFrame::kFace) {
       I.c_face_chassis = t_chassis + Rb_chassis * Eigen::Vector3f(0, 0, -0.7f);  // 符心(车体系)
       // 诊断：面系下 e=R*(0,0,-0.7) 的 x 分量（应≈0），以及视角偏离正对的角度
-      {
-        Eigen::Vector3f e_c = Rb_chassis * Eigen::Vector3f(0, 0, -0.7f);
-        out.face_ex = std::abs((Rc2f * e_c).x());
-        const Eigen::Vector3f cam_dir = (R_cg.transpose() * Eigen::Vector3f::UnitX());
-        out.face_tilt_deg =
-            std::acos(std::clamp(std::abs(I.n_face.dot(cam_dir)), 0.f, 1.f)) * 180.0 / M_PI;
-      }
-    } else if (I.cfg.frame == RefFrame::kChassis) {
-      use.translation = t_chassis;
-      use.rotation = Eigen::Quaternionf(Rb_chassis).normalized();
-    } else {  // kGimbal：故意保留以复现自激
-      use = p;
+      Eigen::Vector3f e_c = Rb_chassis * Eigen::Vector3f(0, 0, -0.7f);
+      out.face_ex = std::abs((Rc2f * e_c).x());
+      const Eigen::Vector3f cam_dir = (R_cg.transpose() * Eigen::Vector3f::UnitX());
+      out.face_tilt_deg =
+          std::acos(std::clamp(std::abs(I.n_face.dot(cam_dir)), 0.f, 1.f)) * 180.0 / M_PI;
     }
     // 6e) 自检：把 PnP 解出的扇叶四角重投影回图像，与检测到的关键点比对。
     //     误差应 < 1px；若很大说明投影链（轴向/内参）有问题。
@@ -731,7 +758,30 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       }
       out.reproj_px = mx;
     }
-    if (dis_ok) I.tracker->push(Buff(use));
+    // 6f) 双靶标融合（大符）
+    //   两片高亮靶标刚性固连在同一个转盘上，所以 roll_B(t) = roll_A(t) + Δ，
+    //   Δ 是常数（5 个槽位 -> 72° 的整数倍）。于是同一帧的两个检出是对【同一个】
+    //   三角函数体系的两次独立测量，可以融合成一次、噪声降 sqrt(2)；
+    //   而且融合后的序列连续，不会再触发 switch_buff_angle 的跳变判据。
+    Buff obs(use);
+    out.rc_dist_m = static_cast<double>(obs.R_center.norm());
+    out.dual_targets = 1;
+    if (I.cfg.dual_target && poses.size() >= 2) {
+      const Buff b2(to_obs(poses[1]));
+      const double step = 2.0 * M_PI / 5.0;
+      const double d = wrap_pi(static_cast<double>(b2.roll) - static_cast<double>(obs.roll));
+      int k = static_cast<int>(std::lround(d / step));
+      if (k == 0) k = (d >= 0.0) ? 1 : -1;  // 两靶标不可能同相位
+      const double delta = k * step;
+      const double rb_norm = wrap_pi(static_cast<double>(b2.roll) - delta);
+      // 圆平均：先把 B 归一化到 A 的相位约定，再取中点
+      obs.roll = static_cast<float>(
+          wrap_pi(static_cast<double>(obs.roll) + 0.5 * wrap_pi(rb_norm - obs.roll)));
+      obs.R_center = 0.5f * (obs.R_center + b2.R_center);  // 转盘中心，两靶标应一致
+      out.dual_targets = 2;
+      out.dual_delta_deg = delta * 180.0 / M_PI;
+    }
+    if (dis_ok) I.tracker->push(obs);
   }
 
   // 7) 状态机推进（无论本帧是否有观测都要 update，与 HW26 example 一致）
