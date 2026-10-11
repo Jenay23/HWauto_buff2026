@@ -12,6 +12,10 @@ constexpr double kOmegaLo = 1.884;
 constexpr double kOmegaHi = 2.000;
 constexpr int kOmegaSteps = 64;
 constexpr double kRidge = 1e-6;
+// 锁存门：残差小于它就认为这一版正弦可信，锁住参数
+constexpr double kLockRmsDeg = 2.5;
+// 解锁门：锁存后，若【一步预测】误差超过它，说明模型不再适用（换了一次激活）-> 重新锁
+constexpr double kRelockErrDeg = 8.0;
 
 double wrapPi(double a) {
   while (a > kPi) a -= 2.0 * kPi;
@@ -120,16 +124,35 @@ void LocalRuneTracker::push(double t, double roll) {
   double w = 0.0, t_ref = 0.0;
   if (fit(&c, &w, &t_ref)) {
     omega_ = w;
-    const double tau = t - t_ref;
-    v_now_ = c(1) + w * (c(2) * std::cos(w * tau) - c(3) * std::sin(w * tau));
-    a_now_ = -w * w * (c(2) * std::sin(w * tau) + c(3) * std::cos(w * tau));
-    // 残差够小就锁存（参数在一次激活内固定）
-    if (rms_deg_ >= 0.0 && rms_deg_ <= 2.5) {
-      locked_ = 1;
-      lock_c_ = c;
-      lock_w_ = w;
-      lock_t_ref_ = t_ref;
+    if (locked_ == 0) {
+      // 还没锁：残差够小就锁住这一版
+      if (rms_deg_ >= 0.0 && rms_deg_ <= kLockRmsDeg) {
+        locked_ = 1;
+        lock_c_ = c;
+        lock_w_ = w;
+        lock_t_ref_ = t_ref;
+      }
+    } else {
+      // 已锁：**参数保持冻结**（这是"锁存"的意义 —— 参数在一次激活内是固定的）。
+      // 之前这里每帧都覆盖 lock_*，导致参数一直在变、预测跟着抖。
+      // 只有当【一步预测】误差变大时，才认为换了一次激活，重新锁。
+      const double tau = t - lock_t_ref_;
+      const double pred = lock_c_(0) + lock_c_(1) * tau + lock_c_(2) * std::sin(lock_w_ * tau) +
+                          lock_c_(3) * std::cos(lock_w_ * tau);
+      const double err_deg = std::abs(wrapPi(unwrapped - pred)) * 180.0 / kPi;
+      if (err_deg > kRelockErrDeg) {
+        lock_c_ = c;
+        lock_w_ = w;
+        lock_t_ref_ = t_ref;
+      }
     }
+    // 诊断用的瞬时速度/加速度：锁存后按【锁存模型】算，避免诊断量自己抖
+    const double tr = (locked_ != 0) ? lock_t_ref_ : t_ref;
+    const Eigen::Vector4d &cc = (locked_ != 0) ? lock_c_ : c;
+    const double ww = (locked_ != 0) ? lock_w_ : w;
+    const double tau2 = t - tr;
+    v_now_ = cc(1) + ww * (cc(2) * std::cos(ww * tau2) - cc(3) * std::sin(ww * tau2));
+    a_now_ = -ww * ww * (cc(2) * std::sin(ww * tau2) + cc(3) * std::cos(ww * tau2));
   }
 }
 
