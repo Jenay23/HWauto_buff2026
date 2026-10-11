@@ -244,6 +244,9 @@ struct Output {
   int local_ready = 0;
   double local_w = 0.0;
   double local_a = 0.0;
+  int local_locked = 0;      // 正弦参数是否已锁存
+  double local_omega = 0.0;   // 拟合出的 omega（应落在 1.884~2.000）
+  double local_amp = 0.0;     // 拟合出的角速度振幅 a（应落在 0.780~1.045）
   double local_rms_deg = -1.0;
   double local_span_deg = 0.0;
   // ---- 可视化用（全部在【车体系】，方便直接喂 project_px）----

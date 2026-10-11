@@ -116,7 +116,9 @@ gravity: 9.81
 yaw_offset_deg: 0.0
 pitch_offset_deg: -20.0     # 抵消枪管相对云台固定上仰 20deg（模拟器 POWER_RUNE_INTERFACE.md）
 predict_time: 0.10          # 额外提前量 s
-gimbal_lead_time: 0.0       # 手动补偿云台稳态滞后 s（先用 0，看日志里的 fire_err 再调）
+gimbal_lead_time: 0.10      # 云台自身响应滞后补偿（0.0 -> 0.10 s）。
+                            # 预测时间会加这么多，让命令提前于目标 -> 蓝点贴绿点。
+                            # 依据：稳定跟踪时看 [bridge] 行的 err=，滞后 ≈ err/13度每秒。       # 手动补偿云台稳态滞后 s（先用 0，看日志里的 fire_err 再调）
 alg_latency: 0.0            # >0 则用它替代实测单帧耗时
 
 # ---- 观测质量闸 ----

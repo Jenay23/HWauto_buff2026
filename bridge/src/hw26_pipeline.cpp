@@ -1051,6 +1051,9 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       out.local_w = I.local_trk.velocity();
       out.local_a = I.local_trk.accel();
       out.local_rms_deg = I.local_trk.rms_deg();
+      out.local_locked = I.local_trk.locked() ? 1 : 0;
+      out.local_omega = I.local_trk.omega();
+      out.local_amp = I.local_trk.amp();
       out.local_span_deg = I.local_trk.span_deg();
     }
 
