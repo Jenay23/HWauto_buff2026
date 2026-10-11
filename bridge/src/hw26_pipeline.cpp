@@ -896,11 +896,41 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
           const Eigen::Vector2f mid = 0.5f * (a + b);
           const Eigen::Vector2f c1 = mid + hh * perp;
           const Eigen::Vector2f c2 = mid - hh * perp;
+          // 选支：**不再用"离上一帧圆心更近"** —— 那是双稳态，错一次就锁死在错的
+          // 一支，两片相位整体偏 180 度（实测 ra 从 +1.571 跳到 -1.574，差正好 pi）。
+          //
+          // 改用【模型自己输出的转盘中心像素】(keypoints[8]，管线前面已存进
+          // I.last_rcenter / I.have_rcenter)：把两个候选都投到图像，取离它更近的。
+          // 为什么可行：两个候选在图像上相距约 57~293 像素（取决于槽距），而这里
+          // 只需要二选一，模型中心几厘米的误差完全不影响判定；而精确圆心仍由
+          // 几何解（两片 + 半径 0.7 这个硬约束）给出，不会把模型偏差带进跟踪。
           Eigen::Vector2f cc = c1;
-          if (I.have_center) {
+          bool picked_by_model = false;
+          if (I.have_rcenter) {
+            auto proj_cand = [&](const Eigen::Vector2f &cyz, int *px, int *py) -> bool {
+              const Eigen::Vector3f cf(0.5f * (t0.x() + t1.x()), cyz.x(), cyz.y());
+              const Eigen::Vector3f pc = R_cg.transpose() * (I.R_chassis_face * cf);
+              return project_cam(gimbal_to_cam(pc), I.cfg.camera_matrix, px, py);
+            };
+            int x1 = -1, y1 = -1, x2 = -1, y2 = -1;
+            if (proj_cand(c1, &x1, &y1) && proj_cand(c2, &x2, &y2)) {
+              const double d1 =
+                  std::hypot(static_cast<double>(x1) - I.last_rcenter.x,
+                             static_cast<double>(y1) - I.last_rcenter.y);
+              const double d2 =
+                  std::hypot(static_cast<double>(x2) - I.last_rcenter.x,
+                             static_cast<double>(y2) - I.last_rcenter.y);
+              cc = (d2 < d1) ? c2 : c1;
+              out.cand_px[0] = d1;
+              out.cand_px[1] = d2;   // 诊断：判别余量应该很大（否则这个方法不可靠）
+              picked_by_model = true;
+            }
+          }
+          if (!picked_by_model && I.have_center) {
+            // 兜底：拿不到模型中心时才退回"离上一帧更近"（已知是双稳态，尽量别用）
             const Eigen::Vector2f pc(I.center_face.y(), I.center_face.z());
             if ((c2 - pc).norm() < (c1 - pc).norm()) cc = c2;
-          } else {
+          } else if (!picked_by_model) {
             // 首帧：用朝向推出的圆心（取两片平均）当中垂线两支解的初值
             const Eigen::Vector3f c_ori =
                 0.5f * (Eigen::Vector3f(Buff(use).R_center) +
