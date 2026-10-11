@@ -92,6 +92,7 @@ class LocalRuneTracker {
   double lock_w_ = 0.0;                               // 锁定的 omega
   Eigen::Vector3d lin_c_ = Eigen::Vector3d::Zero();   // 每帧重解的 (theta0, p, q)
   double t_ref_ = 0.0;                                // 当前窗口的时间原点
+  double sgn_ = 1.0;                                  // 转向符号（由窗口斜率定出）
   double omega_ = 0.0;                                // 诊断：最近拟合的 omega
   double amp_ = 0.0;                                  // 诊断：最近拟合的 a
   double rms_deg_ = -1.0;

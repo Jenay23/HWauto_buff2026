@@ -60,11 +60,17 @@ void LocalRuneTracker::reset() {
 bool LocalRuneTracker::solveLinear(double a, double w, Eigen::Vector3d *coef, double *rms_rad) {
   const int n = static_cast<int>(h_.size());
   if (n < 4) return false;
+  // 转向符号：模拟器的模型 speed = a*sin(w t + phi) + (2.090 - a) 是【正方向】，
+  // 但我们的 roll 是由图像几何得到的，可能是反的（实测 189/196 帧 w<0、roll 单调递减）。
+  // 所以整个模型乘一个 sgn，由窗口两端的粗略斜率定出。约束（平均速度 = 2.090-a、
+  // a/w 的硬边界）全部保留，只是允许两个转向。
+  const double coarse = (h_.back().roll - h_.front().roll) / (h_.back().t - h_.front().t);
+  sgn_ = (coarse < 0.0) ? -1.0 : 1.0;
   Eigen::Matrix3d A = Eigen::Matrix3d::Zero();
   Eigen::Vector3d b = Eigen::Vector3d::Zero();
   for (const auto &s : h_) {
     const double tau = s.t - t_ref_;
-    const double y = s.roll - (kMeanSpeed - a) * tau;  // 已知线性项移到右边
+    const double y = s.roll - sgn_ * (kMeanSpeed - a) * tau;  // 已知线性项移到右边
     Eigen::Vector3d phi(1.0, 1.0 - std::cos(w * tau), std::sin(w * tau));
     A += phi * phi.transpose();
     b += phi * y;
@@ -74,8 +80,8 @@ bool LocalRuneTracker::solveLinear(double a, double w, Eigen::Vector3d *coef, do
   double se = 0.0;
   for (const auto &s : h_) {
     const double tau = s.t - t_ref_;
-    const double pred = (kMeanSpeed - a) * tau + c(0) + c(1) * (1.0 - std::cos(w * tau)) +
-                        c(2) * std::sin(w * tau);
+    const double pred = sgn_ * (kMeanSpeed - a) * tau + c(0) +
+                        sgn_ * (c(1) * (1.0 - std::cos(w * tau)) + c(2) * std::sin(w * tau));
     const double e = s.roll - pred;
     se += e * e;
   }
@@ -157,9 +163,10 @@ void LocalRuneTracker::push(double t, double roll) {
   if (locked_ != 0) {
     const double tau = t - t_ref_;
     const double p = lin_c_(1), q = lin_c_(2);
-    v_now_ =
-        (kMeanSpeed - lock_a_) + lock_w_ * (p * std::sin(lock_w_ * tau) + q * std::cos(lock_w_ * tau));
-    a_now_ = lock_w_ * lock_w_ * (p * std::cos(lock_w_ * tau) - q * std::sin(lock_w_ * tau));
+    v_now_ = sgn_ * ((kMeanSpeed - lock_a_) +
+                     lock_w_ * (p * std::sin(lock_w_ * tau) + q * std::cos(lock_w_ * tau)));
+    a_now_ = sgn_ * lock_w_ * lock_w_ *
+             (p * std::cos(lock_w_ * tau) - q * std::sin(lock_w_ * tau));
   }
 }
 
@@ -169,7 +176,7 @@ bool LocalRuneTracker::predict(double t_future, double *roll_out) const {
   const double tau = t_future - t_ref_;
   if (std::abs(tau) > 3.0) return false;  // 外推太远不信
   const double p = lin_c_(1), q = lin_c_(2);
-  *roll_out = wrapPi((kMeanSpeed - lock_a_) * tau + lin_c_(0) +
-                     p * (1.0 - std::cos(lock_w_ * tau)) + q * std::sin(lock_w_ * tau));
+  *roll_out = wrapPi(sgn_ * (kMeanSpeed - lock_a_) * tau + lin_c_(0) +
+                     sgn_ * (p * (1.0 - std::cos(lock_w_ * tau)) + q * std::sin(lock_w_ * tau)));
   return true;
 }
