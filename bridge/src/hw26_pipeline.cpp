@@ -384,6 +384,10 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   // ══════════ 检测 + PnP：两条后端 ══════════
   // 共同结果：out.solved / out.n_det / out.quality / out.buff_dis / poses（云台系 Pose3f）
   std::vector<Pose3f> poses;
+  // 与 poses 平行的【来源下标】（对应 out.det_kpts / detected 的顺序）。
+  // 可视化要把黄/品红的组号稳定地绑在同一片靶标上，就需要这个映射；
+  // 融合块在更外层，所以必须声明在这里。
+  std::vector<std::size_t> selected_src;
   const Eigen::Matrix3f R_cg = gimbal_rotation(gimbal_yaw, gimbal_pitch, gimbal_roll);
   // OpenCV 相机系(X右 Y下 Z前) -> 云台系(X前 Y左 Z上)。
   // 取值来自 hw26_pipeline.hpp 的单一来源：当前模拟器的相机与枪管平行
@@ -599,20 +603,26 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
     // 相位每帧跳 72° -> 超过 switch_buff_angle(45.8°) -> BigBuffObserver 把
     // 每一帧都判成"换片"丢弃 -> RANSAC 永远拿不到数据 -> st 卡在 CONVERGING
     // -> ctrl 恒为 0（完全不瞄准）。这就是实测日志里的现象。
-    for (const auto &b : dets) {
+    std::vector<std::size_t> pass;
+    for (std::size_t i = 0; i < dets.size(); ++i) {
+      const auto &b = dets[i];
       if (I.cfg.filter_color && b.color != I.cfg.buff_color) continue;
       if (I.cfg.filter_activation &&
           b.label != static_cast<int>(buff_algo::BuffActivation::INACTIVATE))
         continue;
-      selected.push_back(b);
+      pass.push_back(i);
     }
     // 大符最多高亮 2 片，多于 2 个时按置信度取前 2（第 3 个通常是假阳）
-    if (selected.size() > 2) {
-      std::partial_sort(selected.begin(), selected.begin() + 2, selected.end(),
-                        [](const BuffDetection &x, const BuffDetection &y) {
-                          return x.confidence > y.confidence;
+    if (pass.size() > 2) {
+      std::partial_sort(pass.begin(), pass.begin() + 2, pass.end(),
+                        [&](std::size_t x, std::size_t y) {
+                          return dets[x].confidence > dets[y].confidence;
                         });
-      selected.resize(2);
+      pass.resize(2);
+    }
+    for (std::size_t i : pass) {
+      selected.push_back(dets[i]);
+      selected_src.push_back(i);
     }
   } else if (I.cfg.filter_color && I.cfg.filter_activation) {
     I.selector->select_buffs(dets, selected);  // HW26 原逻辑（小符：只保留 1 个）
@@ -777,27 +787,49 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
     out.rc_dist_m = static_cast<double>(obs.R_center.norm());
     out.dual_targets = 1;
     out.meas_a_valid = true;
-    out.meas_a_ch = R_cg * use.translation;  // A 片实测板心（车体系）
+    out.meas_a_ch = R_cg * use.translation;  // 1 号实测板心（车体系）
     if (I.cfg.dual_target && poses.size() >= 2) {
       const Pose3f use2 = to_obs(poses[1]);
-      const Buff b2(use2);
+      // ★ 组号必须【稳定】：按 wrap 之后的相位先后决定谁是 1 号，而不是按置信度。
+      //   按置信度排的话，两片置信度互相超过时（0.91 <-> 0.89）黄/品红会来回换 ——
+      //   这是实测看到的现象。相位差是常数，所以 wrap 后的先后是稳定的。
+      Buff A = obs;
+      Buff B(use2);
+      bool pose0_is_a = true;
+      if (wrap_pi(static_cast<double>(B.roll) - static_cast<double>(A.roll)) < 0.0) {
+        std::swap(A, B);
+        pose0_is_a = false;
+      }
+      const std::size_t src_a = selected_src.size() >= 2
+                                    ? (pose0_is_a ? selected_src[0] : selected_src[1])
+                                    : 0;
+      const std::size_t src_b = selected_src.size() >= 2
+                                    ? (pose0_is_a ? selected_src[1] : selected_src[0])
+                                    : 1;
       const double step = 2.0 * M_PI / 5.0;
-      const double d = wrap_pi(static_cast<double>(b2.roll) - static_cast<double>(obs.roll));
+      const double d = wrap_pi(static_cast<double>(B.roll) - static_cast<double>(A.roll));  // >= 0
       int k = static_cast<int>(std::lround(d / step));
-      if (k == 0) k = (d >= 0.0) ? 1 : -1;  // 两靶标不可能同相位
+      if (k == 0) k = 1;  // 两靶标不可能同相位
       const double delta = k * step;
       // 诊断：吸附残差与两中心分歧 —— 这两条是"72° 刚性固连"假设的直接检验
       out.dual_resid_deg = std::abs(d - delta) * 180.0 / M_PI;
-      out.dual_rcd_m = static_cast<double>((obs.R_center - b2.R_center).norm());
-      const double rb_norm = wrap_pi(static_cast<double>(b2.roll) - delta);
-      // 圆平均：先把 B 归一化到 A 的相位约定，再取中点
-      obs.roll = static_cast<float>(
-          wrap_pi(static_cast<double>(obs.roll) + 0.5 * wrap_pi(rb_norm - obs.roll)));
-      obs.R_center = 0.5f * (obs.R_center + b2.R_center);  // 转盘中心，两靶标应一致
+      out.dual_rcd_m = static_cast<double>((A.R_center - B.R_center).norm());
+      const double rb_norm = wrap_pi(static_cast<double>(B.roll) - delta);
+      // 圆平均：先把 B 归一化到 A 的相位约定，再取中点（结果与谁叫 A 无关）
+      A.roll = static_cast<float>(
+          wrap_pi(static_cast<double>(A.roll) + 0.5 * wrap_pi(rb_norm - A.roll)));
+      A.R_center = 0.5f * (A.R_center + B.R_center);  // 转盘中心，两靶标应一致
+      obs = A;
       out.dual_targets = 2;
       out.dual_delta_deg = delta * 180.0 / M_PI;
+      out.meas_a_valid = true;
       out.meas_b_valid = true;
-      out.meas_b_ch = R_cg * use2.translation;  // B 片实测板心（车体系）
+      out.meas_a_ch = R_cg * (pose0_is_a ? use.translation : use2.translation);
+      out.meas_b_ch = R_cg * (pose0_is_a ? use2.translation : use.translation);
+      // 关键点组号按同一顺序重排：黄 = 1 号、品红 = 2 号，稳定不换
+      if (out.det_kpts.size() >= 2 && src_a != src_b) {
+        std::swap(out.det_kpts[src_a], out.det_kpts[src_b]);
+      }
     }
     if (dis_ok) I.tracker->push(obs);
   }
