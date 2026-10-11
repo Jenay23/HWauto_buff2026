@@ -1004,11 +1004,11 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       // 诊断：吸附残差与两中心分歧 —— 这两条是"72° 刚性固连"假设的直接检验
       out.dual_resid_deg = std::abs(d - delta) * 180.0 / M_PI;
       out.dual_rcd_m = static_cast<double>((A.R_center - B.R_center).norm());
-      const double rb_norm = wrap_pi(static_cast<double>(B.roll) - delta);
-      // 圆平均：先把 B 归一化到 A 的相位约定，再取中点（结果与谁叫 A 无关）
-      A.roll = static_cast<float>(
-          wrap_pi(static_cast<double>(A.roll) + 0.5 * wrap_pi(rb_norm - A.roll)));
-      A.R_center = 0.5f * (A.R_center + B.R_center);  // 转盘中心，两靶标应一致
+      // 【不再融合两片】直接喂 A 自己的相位。
+      // 理由：正弦模型本来就是对【整个窗口】做最小二乘，自己就会平均噪声，
+      // 不需要靠两片融合降噪；而融合依赖 Δ 恰好是 72/144 的整数倍
+      // （实测 dres 还有 3~23 度），反而把这个误差混进被喂的相位里。
+      // 现在拟合的是【一片真实叶片】的相位，A.R_center 也保持原样（不做平均）。
       obs = A;
       out.dual_targets = 2;
       out.dual_delta_deg = delta * 180.0 / M_PI;
