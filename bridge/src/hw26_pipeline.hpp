@@ -194,6 +194,26 @@ struct Output {
   // 双靶标诊断
   int dual_targets = 0;         // 本帧融入了几个靶标（大符正常 = 2）
   double dual_delta_deg = 0.0;  // 吸附后的相位差 Δ（应为 72 或 144 度）
+  double dual_resid_deg = -1.0; // 吸附残差 |d − k·72°|：应为几度。大了说明两片
+                                // 并不是隔着整数个槽位，"刚性固连"的假设不成立
+  double dual_rcd_m = -1.0;     // 两片各自解出的 R_center 分歧：同一转盘应只有几 cm。
+                                // 大了说明其中一片的位姿不自洽 -> 不能融合
+  // ---- 可视化用（全部在【车体系】，方便直接喂 project_px）----
+  // 关键：两片的实测板心要【分开】留着，否则看不出是哪一片坏了/被平均了
+  bool meas_a_valid = false;
+  bool meas_b_valid = false;
+  Eigen::Vector3f meas_a_ch = Eigen::Vector3f::Zero();  // A 片实测板心
+  Eigen::Vector3f meas_b_ch = Eigen::Vector3f::Zero();  // B 片实测板心
+  // tracker 自己认为的叶片在哪（白叉）+ 它的轨道圆（用于"一眼判跟踪对不对"）
+  bool trk_valid = false;
+  Eigen::Vector3f trk_rc_ch = Eigen::Vector3f::Zero();  // 转盘中心
+  Eigen::Vector3f trk_u_ch = Eigen::Vector3f::Zero();   // 轨道面内基（车体系）
+  Eigen::Vector3f trk_v_ch = Eigen::Vector3f::Zero();
+  Eigen::Vector3f trk_blade_ch = Eigen::Vector3f::Zero();  // 它认为的叶片位置
+  // 每个检出各自的关键点（可视化用）。以前只画 detected[0]，而 detected[0] 是
+  // 置信度最高的那个，两片靶标的置信度会互相超过 -> 画出来的点在两片之间来回跳。
+  // 注意这只影响"画什么"，不影响 tracker 的输入（tracker 用的是融合后的相位）。
+  std::vector<std::vector<cv::Point2f>> det_kpts;
   // |R_center|：到【转盘中心】的距离。它与转盘的相位无关（转盘中心是固定点），
   // 所以是标定 blade_half_size 的理想判据：
   //     h_true = blade_half_size * rc_true / rc_measured

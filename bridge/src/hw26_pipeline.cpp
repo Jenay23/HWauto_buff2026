@@ -499,6 +499,7 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       out.dets.push_back(di);
       out.n_selected = 1;
       for (const auto &q : det->kpt) I.last_kpt.push_back(q);
+      out.det_kpts.push_back(I.last_kpt);  // sp25 只有一个检出，仅用于统一可视化
       I.last_rcenter = det->r_center;
       if (I.cfg.refine_r_center) {
         // blade_bottom = kpt[2]（下），blade_center 用模型 bbox 中心
@@ -562,6 +563,15 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   const auto detected =
       buff_algo::decode_detections(raw, kCandidateCount, kOutputColumns, info, I.dcfg);
   out.n_det = static_cast<int>(detected.size());
+  // 可视化：把【每一个】检出的关键点都收进来（大符会有 2 组），
+  // 而不是只画 detected[0] —— 后者是置信度最高的那个，两片靶标会互相超过，
+  // 于是画出来的点在两片之间来回跳。这不影响 tracker 的输入。
+  for (const auto &d : detected) {
+    std::vector<cv::Point2f> one;
+    one.reserve(d.keypoints.size());
+    for (const auto &q : d.keypoints) one.emplace_back(q.x(), q.y());
+    out.det_kpts.push_back(std::move(one));
+  }
   if (!detected.empty()) {
     for (const auto &q : detected[0].keypoints)
       I.last_kpt.push_back(cv::Point2f(q.x(), q.y()));
@@ -766,13 +776,19 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
     Buff obs(use);
     out.rc_dist_m = static_cast<double>(obs.R_center.norm());
     out.dual_targets = 1;
+    out.meas_a_valid = true;
+    out.meas_a_ch = R_cg * use.translation;  // A 片实测板心（车体系）
     if (I.cfg.dual_target && poses.size() >= 2) {
-      const Buff b2(to_obs(poses[1]));
+      const Pose3f use2 = to_obs(poses[1]);
+      const Buff b2(use2);
       const double step = 2.0 * M_PI / 5.0;
       const double d = wrap_pi(static_cast<double>(b2.roll) - static_cast<double>(obs.roll));
       int k = static_cast<int>(std::lround(d / step));
       if (k == 0) k = (d >= 0.0) ? 1 : -1;  // 两靶标不可能同相位
       const double delta = k * step;
+      // 诊断：吸附残差与两中心分歧 —— 这两条是"72° 刚性固连"假设的直接检验
+      out.dual_resid_deg = std::abs(d - delta) * 180.0 / M_PI;
+      out.dual_rcd_m = static_cast<double>((obs.R_center - b2.R_center).norm());
       const double rb_norm = wrap_pi(static_cast<double>(b2.roll) - delta);
       // 圆平均：先把 B 归一化到 A 的相位约定，再取中点
       obs.roll = static_cast<float>(
@@ -780,6 +796,8 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       obs.R_center = 0.5f * (obs.R_center + b2.R_center);  // 转盘中心，两靶标应一致
       out.dual_targets = 2;
       out.dual_delta_deg = delta * 180.0 / M_PI;
+      out.meas_b_valid = true;
+      out.meas_b_ch = R_cg * use2.translation;  // B 片实测板心（车体系）
     }
     if (dis_ok) I.tracker->push(obs);
   }
@@ -790,6 +808,27 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   const BuffState state = I.tracker->get_state();
   out.roll = state.roll;
   out.roll_velocity = state.roll_velocity;
+
+  // 7b) tracker 自己认为的叶片位置（可视化用的"白叉"）。
+  //     直接用 HW26 自己的公式与半径 consts::BUFF_RADIUS，保证和它内部一致 ——
+  //     这样"白叉落在实测量上"才能证明跟踪锁的是真靶标。
+  {
+    const float R = buff_algo::consts::BUFF_RADIUS;
+    const Eigen::Vector3f p_obs(state.r_center.x(),
+                                state.r_center.y() - R * std::cos(state.roll),
+                                state.r_center.z() + R * std::sin(state.roll));
+    // 观测系 -> 车体系（tracker 的状态是在 feed 它时所用的参考系里）
+    auto obs2ch = [&](const Eigen::Vector3f &q) -> Eigen::Vector3f {
+      if (I.cfg.frame == RefFrame::kFace) return I.R_chassis_face * q;
+      if (I.cfg.frame == RefFrame::kChassis) return q;
+      return R_cg * q;
+    };
+    out.trk_rc_ch = obs2ch(Eigen::Vector3f(state.r_center));
+    out.trk_u_ch = obs2ch(Eigen::Vector3f(0.f, -1.f, 0.f));  // 轨道面内基（与公式一致）
+    out.trk_v_ch = obs2ch(Eigen::Vector3f(0.f, 0.f, 1.f));
+    out.trk_blade_ch = obs2ch(p_obs);
+    out.trk_valid = true;
+  }
 
   // 8) 预测 + 弹道 + 云台角
   const bool trackable = (out.status == static_cast<int>(StatusType::TRACKING));
@@ -968,6 +1007,10 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   }
 
   if (I.cfg.visualize) {
+    // 车体系 -> 像素（可视化块自己的助手；上面 aim 段那个 project_px 不在此作用域）
+    auto proj_ch = [&](const Eigen::Vector3f &p_ch, int *px, int *py) -> bool {
+      return project_cam(gimbal_to_cam(R_cg.transpose() * p_ch), I.cfg.camera_matrix, px, py);
+    };
     out.debug = bgr.clone();
     const int cx = static_cast<int>(std::lround(I.cfg.camera_matrix.at<double>(0, 2)));
     const int cy = static_cast<int>(std::lround(I.cfg.camera_matrix.at<double>(1, 2)));
@@ -985,13 +1028,69 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
     }
 
     // ---- 把检测到的东西画出来（让"在检测什么"可见）----
-    for (const auto &d : I.last_kpt) {
-      cv::circle(out.debug, {static_cast<int>(d.x), static_cast<int>(d.y)}, 4,
-                 cv::Scalar(0, 255, 255), cv::FILLED, cv::LINE_AA);
+    // 多个检出各自一组颜色：第 1 组黄（与原行为一致），第 2 组品红，第 3 组起循环。
+    // 以前只画 detected[0]，大符时会在两片靶标之间来回跳。
+    {
+      static const cv::Scalar kGroupColor[3] = {
+          cv::Scalar(0, 255, 255),   // 黄
+          cv::Scalar(255, 0, 255),   // 品红
+          cv::Scalar(0, 128, 255),   // 橙
+      };
+      for (std::size_t g = 0; g < out.det_kpts.size(); ++g) {
+        const cv::Scalar &col = kGroupColor[g < 3 ? g : 2];
+        const bool is_second = (g == 1);
+        for (const auto &d : out.det_kpts[g]) {
+          cv::circle(out.debug, {static_cast<int>(d.x), static_cast<int>(d.y)},
+                     is_second ? 3 : 4, col, cv::FILLED, cv::LINE_AA);
+        }
+        // 在每组第一个点旁标出组号，便于区分是哪一片靶标
+        if (!out.det_kpts[g].empty()) {
+          const cv::Point2f &p0 = out.det_kpts[g].front();
+          char tag[8];
+          std::snprintf(tag, sizeof(tag), "%zu", g + 1);
+          cv::putText(out.debug, tag, {static_cast<int>(p0.x) + 6, static_cast<int>(p0.y) - 6},
+                      cv::FONT_HERSHEY_SIMPLEX, 0.6, col, 2, cv::LINE_AA);
+        }
+      }
     }
     if (I.have_rcenter) {
       cv::circle(out.debug, {static_cast<int>(I.last_rcenter.x), static_cast<int>(I.last_rcenter.y)},
                  10, cv::Scalar(255, 255, 0), 2, cv::LINE_AA);  // 中心 R（青）
+    }
+
+    // ---- 大符判据：tracker 认为的叶片（白叉）该落在哪一片实测靶标上？----
+    //   白叉 = tracker 的唯一相位状态推出的叶片位置。它落在【亮绿或暗绿实测点】上
+    //   -> 跟踪锁的是真靶标 ✓；落在两点【正中间】-> 相位被平均歪了 ✗；
+    //   落在圆外/别处 -> 跟踪错了 ✗。
+    if (out.trk_valid && I.face_ready) {
+      // 轨道圆（半径 = consts::BUFF_RADIUS），48 段折线
+      const float R = buff_algo::consts::BUFF_RADIUS;
+      cv::Point prev(-1, -1);
+      for (int i = 0; i <= 48; ++i) {
+        const double th = 2.0 * M_PI * i / 48.0;
+        const Eigen::Vector3f p_ch = out.trk_rc_ch + R * (std::cos(th) * out.trk_u_ch +
+                                                          std::sin(th) * out.trk_v_ch);
+        int px = -1, py = -1;
+        cv::Point cur(-1, -1);
+        if (proj_ch(p_ch, &px, &py)) cur = cv::Point(px, py);
+        if (prev.x >= 0 && cur.x >= 0) {
+          cv::line(out.debug, prev, cur, cv::Scalar(110, 110, 110), 1, cv::LINE_AA);
+        }
+        prev = cur;
+      }
+      // 两片各自实测的板心
+      int ax = -1, ay = -1, bx = -1, by = -1;
+      const bool okA = out.meas_a_valid && proj_ch(out.meas_a_ch, &ax, &ay);
+      const bool okB = out.meas_b_valid && proj_ch(out.meas_b_ch, &bx, &by);
+      if (okA) cv::circle(out.debug, {ax, ay}, 6, cv::Scalar(0, 255, 0), cv::FILLED, cv::LINE_AA);
+      if (okB) cv::circle(out.debug, {bx, by}, 6, cv::Scalar(0, 160, 0), cv::FILLED, cv::LINE_AA);
+      // tracker 认为的叶片位置：白叉
+      int tx = -1, ty = -1;
+      if (proj_ch(out.trk_blade_ch, &tx, &ty)) {
+        const cv::Scalar w(255, 255, 255);
+        cv::line(out.debug, {tx - 9, ty - 9}, {tx + 9, ty + 9}, w, 2, cv::LINE_AA);
+        cv::line(out.debug, {tx - 9, ty + 9}, {tx + 9, ty - 9}, w, 2, cv::LINE_AA);
+      }
     }
     char txt[256];
     const char *st = (out.status == 0)   ? "CONVERGING"
@@ -1010,6 +1109,16 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
                   out.blue_range);
     cv::putText(out.debug, txt, {12, 88}, cv::FONT_HERSHEY_SIMPLEX, 0.55,
                 cv::Scalar(200, 200, 200), 1, cv::LINE_AA);
+    // 双靶标自检：nt=融合了几片  dlt=吸附后的 Δ  dres=吸附残差(应为几度)
+    //             rcd=两片解出的转盘中心分歧(应为几 cm)  rc=到转盘中心距离(标定用)
+    std::snprintf(txt, sizeof(txt),
+                  "nt=%d dlt=%.0f dres=%.1fdeg rcd=%.2fm rc=%.2fm  "
+                  "白叉=tracker认为的叶片(该落在绿点上)",
+                  out.dual_targets, out.dual_delta_deg, out.dual_resid_deg, out.dual_rcd_m,
+                  out.rc_dist_m);
+    cv::putText(out.debug, txt, {12, 112}, cv::FONT_HERSHEY_SIMPLEX, 0.55,
+                (out.dual_targets == 2) ? cv::Scalar(0, 255, 0) : cv::Scalar(0, 140, 255), 1,
+                cv::LINE_AA);
   }
 
   const auto t_end = std::chrono::steady_clock::now();
