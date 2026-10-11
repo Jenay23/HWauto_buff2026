@@ -214,9 +214,15 @@ struct Pipeline::Impl {
   cv::Point2f last_rcenter{0.f, 0.f};
   cv::Point2f last_rcenter_rough{0.f, 0.f};
 
-  bool has_prev_pose = false;
-  Eigen::Vector3f prev_t = Eigen::Vector3f::Zero();
-  Eigen::Quaternionf prev_q = Eigen::Quaternionf::Identity();
+  // IPPE 双解消歧的"上一帧位姿"。**必须按靶标分开两份**：
+  // 大符每帧要解两片靶标，若共用一份，解第 2 片时比较的是第 1 片上一帧的位姿
+  // -> 双解选错 -> 该片 roll 跳 ~180° -> 相位差的符号翻转 -> 按相位排的组号
+  // 也跟着翻（实测现象：黄/品红来回换）。槽 0 给小符/单靶标用。
+  static constexpr int kPoseSlots = 2;
+  bool has_prev_pose[kPoseSlots] = {false, false};
+  Eigen::Vector3f prev_t[kPoseSlots] = {Eigen::Vector3f::Zero(), Eigen::Vector3f::Zero()};
+  Eigen::Quaternionf prev_q[kPoseSlots] = {Eigen::Quaternionf::Identity(),
+                                           Eigen::Quaternionf::Identity()};
 
   std::unique_ptr<buff_algo::BuffSelector> selector;
   std::unique_ptr<buff_algo::BuffPnPSolver> solver;
@@ -414,8 +420,9 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       {0.f, static_cast<float>(-h_plate), 0.f},
   };
   auto solve_pose_ippe = [&](const cv::Point2f &pt, const cv::Point2f &pl,
-                             const cv::Point2f &pb,
-                             const cv::Point2f &pr) -> std::optional<Pose3f> {
+                             const cv::Point2f &pb, const cv::Point2f &pr,
+                             int slot) -> std::optional<Pose3f> {
+    slot = (slot < 0 || slot >= Impl::kPoseSlots) ? 0 : slot;
     const std::vector<cv::Point2f> img = {pt, pl, pb, pr};
     std::vector<cv::Mat> rvecs, tvecs;
     std::vector<double> errs;
@@ -431,7 +438,7 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
     int pick = 0;
     if (rvecs.size() == 1) {
       pick = 0;
-    } else if (!I.has_prev_pose) {
+    } else if (!I.has_prev_pose[slot]) {
       pick = (errs.size() >= 2 && errs[1] < errs[0]) ? 1 : 0;
     } else {
       // 连续性判据必须放在【静止系】里比较：这里用云台系，因为 prev 也在同一
@@ -448,9 +455,10 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
           for (int b = 0; b < 3; ++b) Re(a, b) = static_cast<float>(Rm.at<double>(a, b));
         const Eigen::Vector3f t_g = R_cam2gim * t_c;
         const Eigen::Quaternionf q(Eigen::Matrix3f(R_cam2gim * Re * R_cam2gim.transpose()));
-        const double dt = (t_g - I.prev_t).norm();
+        const double dt = (t_g - I.prev_t[slot]).norm();
         const double dq =
-            2.0 * std::acos(std::min(1.0, std::abs(static_cast<double>(q.dot(I.prev_q)))));
+            2.0 * std::acos(
+                std::min(1.0, std::abs(static_cast<double>(q.dot(I.prev_q[slot])))));
         const double score = 2.0 * dt + dq;
         if (score < best) {
           best = score;
@@ -470,9 +478,9 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
     Pose3f p;
     p.translation = R_cam2gim * t_cam;                    // 相机系 -> 云台系
     p.rotation = Eigen::Quaternionf(R_cam2gim * Re).normalized();
-    I.has_prev_pose = true;
-    I.prev_t = p.translation;   // 云台系
-    I.prev_q = p.rotation;      // 云台系
+    I.has_prev_pose[slot] = true;
+    I.prev_t[slot] = p.translation;   // 云台系
+    I.prev_q[slot] = p.rotation;      // 云台系
     out.n_solutions = static_cast<int>(rvecs.size());
     out.sol_pick = pick;
     return p;
@@ -516,7 +524,8 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       I.have_rcenter = true;
 
       // 走两个后端共用的 PnP（物体点 0.127，见本函数开头的 solve_pose_ippe）
-      if (const auto pose = solve_pose_ippe(det->kpt[0], det->kpt[1], det->kpt[2], det->kpt[3])) {
+      if (const auto pose =
+            solve_pose_ippe(det->kpt[0], det->kpt[1], det->kpt[2], det->kpt[3], 0)) {
         poses.push_back(*pose);
       }
     }
@@ -529,7 +538,7 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
     const cv::Point2f &pb = I.ext_kpts[2];
     const cv::Point2f &pr = I.ext_kpts[3];
     for (const auto &q : I.ext_kpts) I.last_kpt.push_back(q);
-    if (const auto pose = solve_pose_ippe(pt, pl, pb, pr)) poses.push_back(*pose);
+    if (const auto pose = solve_pose_ippe(pt, pl, pb, pr, 0)) poses.push_back(*pose);
     DetInfo di;
     di.color = I.cfg.buff_color;
     di.label = 0;
@@ -671,10 +680,13 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   //    consts::BUFF_POINTS = 0.114，那是它实车靶板的尺寸，用在模拟器上会让
   //    距离偏大约 10%（实测 10.18% vs 0.127 的 0.18%）。
   //    BuffDetection 的 t/l/b/r 与 sp25 的 kpt[0..3] 都是"上/左/下/右"同一批物理点。
-  for (const auto &b : selected) {
+  for (std::size_t si = 0; si < selected.size(); ++si) {
+    const auto &b = selected[si];
+    // 每个靶标用【自己】的连续性槽位：大符两片各自独立消歧，互不干扰
+    const int slot = static_cast<int>(si);
     if (const auto pose =
             solve_pose_ippe(cv::Point2f(b.t.x(), b.t.y()), cv::Point2f(b.l.x(), b.l.y()),
-                            cv::Point2f(b.b.x(), b.b.y()), cv::Point2f(b.r.x(), b.r.y()))) {
+                            cv::Point2f(b.b.x(), b.b.y()), cv::Point2f(b.r.x(), b.r.y()), slot)) {
       poses.push_back(*pose);
     }
   }
@@ -778,6 +790,12 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       }
       out.reproj_px = mx;
     }
+    // 观测系 -> 车体系（meas_* 是观测系里的板心，画图前必须转对）
+    auto obs2ch_v = [&](const Eigen::Vector3f &q) -> Eigen::Vector3f {
+      if (I.cfg.frame == RefFrame::kFace) return I.R_chassis_face * q;
+      if (I.cfg.frame == RefFrame::kChassis) return q;
+      return R_cg * q;
+    };
     // 6f) 双靶标融合（大符）
     //   两片高亮靶标刚性固连在同一个转盘上，所以 roll_B(t) = roll_A(t) + Δ，
     //   Δ 是常数（5 个槽位 -> 72° 的整数倍）。于是同一帧的两个检出是对【同一个】
@@ -787,7 +805,7 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
     out.rc_dist_m = static_cast<double>(obs.R_center.norm());
     out.dual_targets = 1;
     out.meas_a_valid = true;
-    out.meas_a_ch = R_cg * use.translation;  // 1 号实测板心（车体系）
+    out.meas_a_ch = obs2ch_v(use.translation);  // 1 号实测板心（车体系）
     if (I.cfg.dual_target && poses.size() >= 2) {
       const Pose3f use2 = to_obs(poses[1]);
       // ★ 组号必须【稳定】：按 wrap 之后的相位先后决定谁是 1 号，而不是按置信度。
@@ -824,8 +842,8 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       out.dual_delta_deg = delta * 180.0 / M_PI;
       out.meas_a_valid = true;
       out.meas_b_valid = true;
-      out.meas_a_ch = R_cg * (pose0_is_a ? use.translation : use2.translation);
-      out.meas_b_ch = R_cg * (pose0_is_a ? use2.translation : use.translation);
+      out.meas_a_ch = obs2ch_v(pose0_is_a ? use.translation : use2.translation);
+      out.meas_b_ch = obs2ch_v(pose0_is_a ? use2.translation : use.translation);
       // 关键点组号按同一顺序重排：黄 = 1 号、品红 = 2 号，稳定不换
       if (out.det_kpts.size() >= 2 && src_a != src_b) {
         std::swap(out.det_kpts[src_a], out.det_kpts[src_b]);
@@ -841,9 +859,8 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   out.roll = state.roll;
   out.roll_velocity = state.roll_velocity;
 
-  // 7b) tracker 自己认为的叶片位置（可视化用的"白叉"）。
-  //     直接用 HW26 自己的公式与半径 consts::BUFF_RADIUS，保证和它内部一致 ——
-  //     这样"白叉落在实测量上"才能证明跟踪锁的是真靶标。
+  // 7b) tracker 自己认为的叶片位置（诊断量，供离线核对"它锁的是不是真靶标"）。
+  //     直接用 HW26 自己的公式与半径 consts::BUFF_RADIUS，保证和它内部一致。
   {
     const float R = buff_algo::consts::BUFF_RADIUS;
     const Eigen::Vector3f p_obs(state.r_center.x(),
@@ -1090,39 +1107,16 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
                  10, cv::Scalar(255, 255, 0), 2, cv::LINE_AA);  // 中心 R（青）
     }
 
-    // ---- 大符判据：tracker 认为的叶片（白叉）该落在哪一片实测靶标上？----
-    //   白叉 = tracker 的唯一相位状态推出的叶片位置。它落在【亮绿或暗绿实测点】上
-    //   -> 跟踪锁的是真靶标 ✓；落在两点【正中间】-> 相位被平均歪了 ✗；
-    //   落在圆外/别处 -> 跟踪错了 ✗。
+    // ---- 两片各自实测的板心（亮绿/暗绿）----
+    //   判据：两点应落在同一个转盘的轨道上，角间距 72° 或 144°；
+    //   它们各自对应一片点亮的靶标（关键点组 1 / 组 2 也应该各落在一片上面）。
     if (out.trk_valid && I.face_ready) {
-      // 轨道圆（半径 = consts::BUFF_RADIUS），48 段折线
-      const float R = buff_algo::consts::BUFF_RADIUS;
-      cv::Point prev(-1, -1);
-      for (int i = 0; i <= 48; ++i) {
-        const double th = 2.0 * M_PI * i / 48.0;
-        const Eigen::Vector3f p_ch = out.trk_rc_ch + R * (std::cos(th) * out.trk_u_ch +
-                                                          std::sin(th) * out.trk_v_ch);
-        int px = -1, py = -1;
-        cv::Point cur(-1, -1);
-        if (proj_ch(p_ch, &px, &py)) cur = cv::Point(px, py);
-        if (prev.x >= 0 && cur.x >= 0) {
-          cv::line(out.debug, prev, cur, cv::Scalar(110, 110, 110), 1, cv::LINE_AA);
-        }
-        prev = cur;
-      }
       // 两片各自实测的板心
       int ax = -1, ay = -1, bx = -1, by = -1;
       const bool okA = out.meas_a_valid && proj_ch(out.meas_a_ch, &ax, &ay);
       const bool okB = out.meas_b_valid && proj_ch(out.meas_b_ch, &bx, &by);
       if (okA) cv::circle(out.debug, {ax, ay}, 6, cv::Scalar(0, 255, 0), cv::FILLED, cv::LINE_AA);
       if (okB) cv::circle(out.debug, {bx, by}, 6, cv::Scalar(0, 160, 0), cv::FILLED, cv::LINE_AA);
-      // tracker 认为的叶片位置：白叉
-      int tx = -1, ty = -1;
-      if (proj_ch(out.trk_blade_ch, &tx, &ty)) {
-        const cv::Scalar w(255, 255, 255);
-        cv::line(out.debug, {tx - 9, ty - 9}, {tx + 9, ty + 9}, w, 2, cv::LINE_AA);
-        cv::line(out.debug, {tx - 9, ty + 9}, {tx + 9, ty - 9}, w, 2, cv::LINE_AA);
-      }
     }
     char txt[256];
     const char *st = (out.status == 0)   ? "CONVERGING"
@@ -1144,8 +1138,7 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
     // 双靶标自检：nt=融合了几片  dlt=吸附后的 Δ  dres=吸附残差(应为几度)
     //             rcd=两片解出的转盘中心分歧(应为几 cm)  rc=到转盘中心距离(标定用)
     std::snprintf(txt, sizeof(txt),
-                  "nt=%d dlt=%.0f dres=%.1fdeg rcd=%.2fm rc=%.2fm  "
-                  "白叉=tracker认为的叶片(该落在绿点上)",
+                  "nt=%d dlt=%.0f dres=%.1fdeg rcd=%.2fm rc=%.2fm",
                   out.dual_targets, out.dual_delta_deg, out.dual_resid_deg, out.dual_rcd_m,
                   out.rc_dist_m);
     cv::putText(out.debug, txt, {12, 112}, cv::FONT_HERSHEY_SIMPLEX, 0.55,
