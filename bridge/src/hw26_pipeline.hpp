@@ -228,6 +228,8 @@ struct Output {
   int local_ready = 0;
   double local_w = 0.0;
   double local_a = 0.0;
+  double local_rms_deg = -1.0;
+  double local_span_deg = 0.0;
   // ---- 可视化用（全部在【车体系】，方便直接喂 project_px）----
   // 关键：两片的实测板心要【分开】留着，否则看不出是哪一片坏了/被平均了
   bool meas_a_valid = false;

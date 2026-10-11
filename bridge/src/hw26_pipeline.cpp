@@ -1001,6 +1001,8 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       out.local_ready = I.local_trk.ready() ? 1 : 0;
       out.local_w = I.local_trk.velocity();
       out.local_a = I.local_trk.accel();
+      out.local_rms_deg = I.local_trk.rms_deg();
+      out.local_span_deg = I.local_trk.span_deg();
     }
 
     // 6f-1) 相位低通（滑动平均 N 帧，解缠后平均）。目的见 Config::phase_ma_n 注释。

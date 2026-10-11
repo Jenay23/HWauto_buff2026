@@ -30,8 +30,16 @@ class LocalRuneTracker {
   // 喂一个观测。roll 是【观测系】里的相位（rad），内部自动解缠，可以跨 ±pi。
   void push(double t, double roll);
 
-  // 样本数够不够（默认 6 个）
-  bool ready() const { return static_cast<int>(h_.size()) >= min_n_; }
+  // 能不能用：三个门同时满足
+  //   1) 样本数 >= min_n（默认 12，约 0.4s）
+  //   2) 累计相位跨度 >= min_span_deg（默认 30 度）—— 跨度不够时，正弦项与线性项
+  //      几乎线性相关，二次拟合病态 -> 加速度被噪声放大 -> 外推乱跳
+  //   3) 拟合 RMS 残差 <= max_rms_deg（默认 2.5 度）—— 数据不自洽时宁可不给预测
+  // 实测教训：一开始只用 6 个样本就 ready，绿点很早就出现，但跟踪特别差。
+  bool ready() const {
+    return static_cast<int>(h_.size()) >= min_n_ && span_deg_ >= min_span_deg_ &&
+           rms_deg_ >= 0.0 && rms_deg_ <= max_rms_deg_;
+  }
   int n() const { return static_cast<int>(h_.size()); }
 
   // 预测 t_future 时刻的相位，结果 wrap 到 (-pi, pi]。未 ready 时返回 false。
@@ -43,6 +51,13 @@ class LocalRuneTracker {
 
   void set_window(int n) { win_ = n; }
   void set_min_samples(int n) { min_n_ = n; }
+  void set_min_span_deg(double d) { min_span_deg_ = d; }
+  void set_max_rms_deg(double d) { max_rms_deg_ = d; }
+  void set_ridge(double r) { ridge_ = r; }
+
+  // 诊断
+  double rms_deg() const { return rms_deg_; }
+  double span_deg() const { return span_deg_; }
 
  private:
   struct Sample {
@@ -57,8 +72,14 @@ class LocalRuneTracker {
   double last_raw_ = 0.0;
   double last_unwrapped_ = 0.0;
   bool have_last_ = false;
-  int win_ = 15;    // 约 0.5 s @30fps
-  int min_n_ = 6;
+  int win_ = 20;          // 约 0.6 s @30fps
+  int min_n_ = 12;        // 约 0.4 s —— 实测 6 个太少，预测乱跳
+  double min_span_deg_ = 30.0;
+  double max_rms_deg_ = 2.5;
+  // ridge：对 (速度, 加速度) 加小惩罚，数据撑不住时自动退化成"匀速外推"
+  double ridge_ = 1e-3;
   double v_now_ = 0.0;
   double a_now_ = 0.0;
+  double rms_deg_ = -1.0;
+  double span_deg_ = 0.0;
 };

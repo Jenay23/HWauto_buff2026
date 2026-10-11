@@ -38,6 +38,20 @@ void LocalRuneTracker::push(double t, double roll) {
   if (fit(&c, &t_ref)) {
     v_now_ = c(1);        // 相位对时间的一阶导（局部时刻）
     a_now_ = 2.0 * c(2);
+    // 诊断：拟合残差 RMS 与窗口内的相位跨度
+    double se = 0.0;
+    for (const auto &s : h_) {
+      const double tau = s.t - t_ref;
+      const double pred = c(0) + c(1) * tau + c(2) * tau * tau;
+      const double e = s.roll - pred;
+      se += e * e;
+    }
+    rms_deg_ = std::sqrt(se / static_cast<double>(h_.size())) * 180.0 / kPi;
+    span_deg_ = (h_.back().roll - h_.front().roll) * 180.0 / kPi;
+  }
+  if (h_.size() < 3) {
+    rms_deg_ = -1.0;
+    span_deg_ = 0.0;
   }
 }
 
@@ -55,6 +69,9 @@ bool LocalRuneTracker::fit(Eigen::Vector3d *coef, double *t_ref) const {
     b += phi * s.roll;
   }
   // 3x3 对称正定，用 LDLT
+  // ridge：只惩罚 (速度, 加速度) 两项，不惩罚常数项（相位本身是无界的）
+  A(1, 1) += ridge_;
+  A(2, 2) += ridge_;
   const Eigen::Vector3d c = A.ldlt().solve(b);
   if (!c.allFinite()) return false;
   *coef = c;

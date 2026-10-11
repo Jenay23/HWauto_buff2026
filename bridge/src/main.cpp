@@ -941,9 +941,10 @@ int main(int argc, char **argv) {
       if (out.dual_targets == 2 && k % 10 == 0) {
         std::printf(
             "[dual] droll=(%.1f,%.1f)deg pick=(%d,%d) dres=%.1fdeg chord=%.3fm "
-            "rcd(旧口径)=%.2fm dlt=%.0f\n",
+            "rcd=%.2fm dlt=%.0f | local n=%d rdy=%d rms=%.1fdeg span=%.0fdeg w=%.2f\n",
             out.droll_deg[0], out.droll_deg[1], out.sol_pick_t[0], out.sol_pick_t[1],
-            out.dual_resid_deg, out.chord_m, out.dual_rcd_m, out.dual_delta_deg);
+            out.dual_resid_deg, out.chord_m, out.dual_rcd_m, out.dual_delta_deg, out.local_n,
+            out.local_ready, out.local_rms_deg, out.local_span_deg, out.local_w);
         std::fflush(stdout);
       }
       if (max_frames > 0 && static_cast<int>(k) >= max_frames) {
