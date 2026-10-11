@@ -138,7 +138,11 @@ buff_tracker:
       max_omega: 2.0
       min_amplitude: 0.780
       max_amplitude: 1.045
-      min_inliers: 100
+      # 实测：一次点亮窗口只有约 58 帧（亮 ~58 / 灭 ~55），而 det=0 会让 tracker
+      # 进 LOST、下次进 CONVERGING 时 initialize() 把 RANSAC 数据全清掉 -> 无法跨
+      # 窗口累积。所以 100 永远够不到（58 < 100），st 恒为 0。降到 35 让一个窗口内
+      # 可以 ready。【待验证】期望 st 能到 1(TRACKING)。
+      min_inliers: 35
       max_abs_speed: 2.090
     kf_yaw:
       process_noise: !!opencv-matrix
@@ -1283,9 +1287,16 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
     std::snprintf(txt, sizeof(txt), "lat=%.0fms lead=%.3fs fly=%.3fs", out.latency_ms, lead, fly);
     cv::putText(out.debug, txt, {12, 62}, cv::FONT_HERSHEY_SIMPLEX, 0.6,
                 cv::Scalar(0, 255, 255), 1, cv::LINE_AA);
-    std::snprintf(txt, sizeof(txt), "GREEN=future hit  BLUE=barrel-on-rune-plane(%.2fm)  CYAN=R center",
+    std::snprintf(txt, sizeof(txt),
+                  "YELLOW/MAGENTA/ORANGE=3 det groups(9 kpts, 9th=R)  "
+                  "BRIGHT/DARK GREEN=meas blade center 1/2  CYAN ring=R center",
                   out.blue_range);
-    cv::putText(out.debug, txt, {12, 88}, cv::FONT_HERSHEY_SIMPLEX, 0.55,
+    cv::putText(out.debug, txt, {12, 88}, cv::FONT_HERSHEY_SIMPLEX, 0.5,
+                cv::Scalar(200, 200, 200), 1, cv::LINE_AA);
+    std::snprintf(txt, sizeof(txt),
+                  "BIG GREEN=predicted hit  BLUE=barrel ray on rune plane(%.2fm)  "
+                  "GREY CROSS=optical axis", out.blue_range);
+    cv::putText(out.debug, txt, {12, 134}, cv::FONT_HERSHEY_SIMPLEX, 0.5,
                 cv::Scalar(200, 200, 200), 1, cv::LINE_AA);
     // 双靶标自检：nt=融合了几片  dlt=吸附后的 Δ  dres=吸附残差(应为几度)
     //             rcd=两片解出的转盘中心分歧(应为几 cm)  rc=到转盘中心距离(标定用)
