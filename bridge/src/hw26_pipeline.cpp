@@ -226,6 +226,10 @@ struct Pipeline::Impl {
   std::vector<Eigen::Vector3f> prev_ts;
   std::vector<Eigen::Quaternionf> prev_qs;
   std::vector<float> prev_rolls;   // 上一帧两片各自的 roll（诊断用）
+  // 由两片位置联合解出的圆心（符面系）。圆心是固定点，所以它的连续性极可靠，
+  // 可以用来在"中垂线两支解"里选正确的那支。
+  Eigen::Vector3f center_face = Eigen::Vector3f::Zero();
+  bool have_center = false;
 
   std::unique_ptr<buff_algo::BuffSelector> selector;
   std::unique_ptr<buff_algo::BuffPnPSolver> solver;
@@ -715,19 +719,6 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
     I.prev_ts.push_back(q.translation);
     I.prev_qs.push_back(q.rotation);
   }
-  // 6g) 诊断：两片 roll 的帧间变化（不依赖身份的最优配对）。
-  //     某一对残差接近 180 度 = 那片发生了 IPPE 双解翻转 -> 相位被翻到对面。
-  if (cur_rolls.size() == 2 && I.prev_rolls.size() == 2) {
-    auto wa = [](double a) { return wrap_pi(a); };
-    const double a00 = std::abs(wa(cur_rolls[0] - I.prev_rolls[0]));
-    const double a11 = std::abs(wa(cur_rolls[1] - I.prev_rolls[1]));
-    const double a01 = std::abs(wa(cur_rolls[0] - I.prev_rolls[1]));
-    const double a10 = std::abs(wa(cur_rolls[1] - I.prev_rolls[0]));
-    const bool straight = (std::max(a00, a11) <= std::max(a01, a10));
-    out.droll_deg[0] = (straight ? a00 : a01) * 180.0 / M_PI;
-    out.droll_deg[1] = (straight ? a11 : a10) * 180.0 / M_PI;
-  }
-  I.prev_rolls = cur_rolls;
 
   // 6) 观测系变换 + 质量闸 + 送入 Tracker
   if (!poses.empty()) {
@@ -832,18 +823,92 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       if (I.cfg.frame == RefFrame::kChassis) return q;
       return R_cg * q;
     };
+    // 6f-0) 圆心改由【两片位置】联合解出
+    //
+    // 原因：HW26 的 R_center = R*(0,0,-0.7) + t 依赖靶板的【面内朝向】，而 PnP 的
+    // 朝向是从 4 个点 t/l/b/r 恢复的 —— 这 4 个点构成【正方形】，绕法线转 90 度后
+    // 自己重合，所以面内朝向有 4 重退化。实测（两轮日志）两片解出的圆心分歧 rcd
+    // 稳定在 0.8~1.6 m：dlt=144 时约 1.4=2*0.7（有一片径向差了 180 度），
+    // dlt=72 时约 0.85=2*0.7*sin36（两片被拉到近乎同一朝向）。
+    // 位置 t 是无歧义的，且两片刚性固连 -> 必须共享同一个圆心。
+    //
+    //   |t_A - C| = |t_B - C| = 0.7，且 C 在符面内（面系下只看 y-z）
+    //   -> C 在 t_A t_B 的中垂线上，距中点 h = sqrt(0.7^2 - (d/2)^2)
+    //   -> 两支解用"与上一帧圆心更近"选（圆心不动，这个判据极可靠）
+    // 期望效果：两片共用同一个 C -> 相位差恒为 72/144 的整数倍（dres->0），
+    //           且弦长 |t_A-t_B| 应等于 0.823 或 1.331（这是独立可验证的判据）。
+    // 【待验证】尚未实测。
+    Pose3f use_a = use;
+    Pose3f use_b;
+    bool have_b = false;
+    if (I.cfg.dual_target && poses.size() >= 2) {
+      use_b = to_obs(poses[1]);
+      have_b = true;
+      if (I.cfg.frame == RefFrame::kFace) {
+        const Eigen::Vector3f t0 = Rc2f * (R_cg * poses[0].translation);
+        const Eigen::Vector3f t1 = Rc2f * (R_cg * poses[1].translation);
+        const float r = buff_algo::consts::BUFF_RADIUS;
+        out.chord_m = static_cast<double>((t0 - t1).norm());
+        const Eigen::Vector2f a(t0.y(), t0.z()), b(t1.y(), t1.z());
+        const Eigen::Vector2f d2 = b - a;
+        const float dlen = d2.norm();
+        if (dlen > 1e-4f && dlen <= 2.f * r) {
+          const Eigen::Vector2f perp(-d2.y() / dlen, d2.x() / dlen);
+          const float hh = std::sqrt(std::max(0.f, r * r - 0.25f * dlen * dlen));
+          const Eigen::Vector2f mid = 0.5f * (a + b);
+          const Eigen::Vector2f c1 = mid + hh * perp;
+          const Eigen::Vector2f c2 = mid - hh * perp;
+          Eigen::Vector2f cc = c1;
+          if (I.have_center) {
+            const Eigen::Vector2f pc(I.center_face.y(), I.center_face.z());
+            if ((c2 - pc).norm() < (c1 - pc).norm()) cc = c2;
+          } else {
+            // 首帧：用朝向推出的圆心（取两片平均）当中垂线两支解的初值
+            const Eigen::Vector3f c_ori =
+                0.5f * (Eigen::Vector3f(Buff(use).R_center) +
+                        Eigen::Vector3f(Buff(use_b).R_center));
+            const Eigen::Vector2f pc(c_ori.y(), c_ori.z());
+            if ((c2 - pc).norm() < (c1 - pc).norm()) cc = c2;
+          }
+          I.center_face = Eigen::Vector3f(0.5f * (t0.x() + t1.x()), cc.x(), cc.y());
+          I.have_center = true;
+          // 合成观测：z 轴取 (t - C)/r —— 天然落在符面内（x≈0），
+          // 于是 HW26 的固定平面前提【自动满足】，且 Buffalo 算出的 R_center 就等于 C
+          auto mk_obs = [&](const Eigen::Vector3f &tt) -> Pose3f {
+            Eigen::Vector3f z = (tt - I.center_face) / r;
+            z.x() = 0.f;
+            if (z.norm() < 1e-3f) z = Eigen::Vector3f(0.f, 1.f, 0.f);
+            z.normalize();
+            const Eigen::Vector3f lx = Eigen::Vector3f::UnitX();
+            Eigen::Vector3f ly = z.cross(lx);
+            ly.normalize();
+            Eigen::Matrix3f Rf;
+            Rf.col(0) = lx;
+            Rf.col(1) = ly;
+            Rf.col(2) = z;
+            Pose3f o;
+            o.translation = tt;
+            o.rotation = Eigen::Quaternionf(Rf).normalized();
+            return o;
+          };
+          use_a = mk_obs(t0);
+          use_b = mk_obs(t1);
+        }
+      }
+    }
+
     // 6f) 双靶标融合（大符）
     //   两片高亮靶标刚性固连在同一个转盘上，所以 roll_B(t) = roll_A(t) + Δ，
     //   Δ 是常数（5 个槽位 -> 72° 的整数倍）。于是同一帧的两个检出是对【同一个】
     //   三角函数体系的两次独立测量，可以融合成一次、噪声降 sqrt(2)；
     //   而且融合后的序列连续，不会再触发 switch_buff_angle 的跳变判据。
-    Buff obs(use);
+    Buff obs(use_a);
     out.rc_dist_m = static_cast<double>(obs.R_center.norm());
     out.dual_targets = 1;
     out.meas_a_valid = true;
-    out.meas_a_ch = obs2ch_v(use.translation);  // 1 号实测板心（车体系）
-    if (I.cfg.dual_target && poses.size() >= 2) {
-      const Pose3f use2 = to_obs(poses[1]);
+    out.meas_a_ch = obs2ch_v(use_a.translation);  // 1 号实测板心（车体系）
+    if (I.cfg.dual_target && have_b) {
+      const Pose3f use2 = use_b;
       // ★ 组号必须【稳定】：按 wrap 之后的相位先后决定谁是 1 号，而不是按置信度。
       //   按置信度排的话，两片置信度互相超过时（0.91 <-> 0.89）黄/品红会来回换 ——
       //   这是实测看到的现象。相位差是常数，所以 wrap 后的先后是稳定的。
@@ -887,6 +952,20 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       }
     }
     if (dis_ok) I.tracker->push(obs);
+
+      // 6g) 诊断：两片 roll 的帧间变化（不依赖身份的最优配对）。
+      //     某一对残差接近 180 度 = 那片发生了 IPPE 双解翻转 -> 相位被翻到对面。
+      if (cur_rolls.size() == 2 && I.prev_rolls.size() == 2) {
+        auto wa = [](double a) { return wrap_pi(a); };
+        const double a00 = std::abs(wa(cur_rolls[0] - I.prev_rolls[0]));
+        const double a11 = std::abs(wa(cur_rolls[1] - I.prev_rolls[1]));
+        const double a01 = std::abs(wa(cur_rolls[0] - I.prev_rolls[1]));
+        const double a10 = std::abs(wa(cur_rolls[1] - I.prev_rolls[0]));
+        const bool straight = (std::max(a00, a11) <= std::max(a01, a10));
+        out.droll_deg[0] = (straight ? a00 : a01) * 180.0 / M_PI;
+        out.droll_deg[1] = (straight ? a11 : a10) * 180.0 / M_PI;
+      }
+      I.prev_rolls = cur_rolls;
   }
 
   // 7) 状态机推进（无论本帧是否有观测都要 update，与 HW26 example 一致）

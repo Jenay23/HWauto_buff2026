@@ -935,9 +935,10 @@ int main(int argc, char **argv) {
       //   pick  = 两片各自选了第几个 IPPE 解；若某片的 pick 在 0/1 间来回跳，就是它。
       if (out.dual_targets == 2 && k % 10 == 0) {
         std::printf(
-            "[dual] droll=(%.1f,%.1f)deg pick=(%d,%d) dres=%.1fdeg rcd=%.2fm dlt=%.0f rc=%.2f\n",
+            "[dual] droll=(%.1f,%.1f)deg pick=(%d,%d) dres=%.1fdeg chord=%.3fm "
+            "rcd(旧口径)=%.2fm dlt=%.0f\n",
             out.droll_deg[0], out.droll_deg[1], out.sol_pick_t[0], out.sol_pick_t[1],
-            out.dual_resid_deg, out.dual_rcd_m, out.dual_delta_deg, out.rc_dist_m);
+            out.dual_resid_deg, out.chord_m, out.dual_rcd_m, out.dual_delta_deg);
         std::fflush(stdout);
       }
       if (max_frames > 0 && static_cast<int>(k) >= max_frames) {
