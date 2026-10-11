@@ -949,9 +949,24 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       out.meas_b_valid = true;
       out.meas_a_ch = obs2ch_v(pose0_is_a ? use.translation : use2.translation);
       out.meas_b_ch = obs2ch_v(pose0_is_a ? use2.translation : use.translation);
-      // 关键点组号按同一顺序重排：黄 = 1 号、品红 = 2 号，稳定不换
-      if (out.det_kpts.size() >= 2 && src_a != src_b) {
-        std::swap(out.det_kpts[src_a], out.det_kpts[src_b]);
+      // 关键点组号【跟着 A/B 走】：组 0（黄）= A = 亮绿点，组 1（品红）= B = 暗绿点。
+      //
+      // 原来这里是 std::swap(out.det_kpts[src_a], out.det_kpts[src_b])，那是错的：
+      // 它只交换两个来源槽的内容，等价于"把 A 放到 0 号槽"【当且仅当 src_a == 1】。
+      // 而 selected_src 是跟着【置信度】排的（两片 0.91 <-> 0.89 一直在互相超过），
+      // src_a 会在 0/1 之间跳 -> 黄/品红于是逐帧反转，而绿点（直接按 A/B 取
+      // translation）一直是对的。所以"颜色在换"是绘制 bug，不是跟踪在跳。
+      // 改成按 A、B 顺序重建列表，第 3 组起（假阳）跟在后面。
+      if (out.det_kpts.size() >= 2 && src_a != src_b &&
+          src_a < out.det_kpts.size() && src_b < out.det_kpts.size()) {
+        std::vector<std::vector<cv::Point2f>> ordered;
+        ordered.reserve(out.det_kpts.size());
+        ordered.push_back(out.det_kpts[src_a]);  // 组 0 = A
+        ordered.push_back(out.det_kpts[src_b]);  // 组 1 = B
+        for (std::size_t gi = 0; gi < out.det_kpts.size(); ++gi) {
+          if (gi != src_a && gi != src_b) ordered.push_back(out.det_kpts[gi]);
+        }
+        out.det_kpts = std::move(ordered);
       }
     }
     if (dis_ok) I.tracker->push(obs);
@@ -1234,8 +1249,18 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       int ax = -1, ay = -1, bx = -1, by = -1;
       const bool okA = out.meas_a_valid && proj_ch(out.meas_a_ch, &ax, &ay);
       const bool okB = out.meas_b_valid && proj_ch(out.meas_b_ch, &bx, &by);
-      if (okA) cv::circle(out.debug, {ax, ay}, 6, cv::Scalar(0, 255, 0), cv::FILLED, cv::LINE_AA);
-      if (okB) cv::circle(out.debug, {bx, by}, 6, cv::Scalar(0, 160, 0), cv::FILLED, cv::LINE_AA);
+      if (okA) {
+        cv::circle(out.debug, {ax, ay}, 6, cv::Scalar(0, 255, 0), cv::FILLED, cv::LINE_AA);
+        // 组号写在绿点旁：亮绿点 = 组 1（A），应与黄色关键点组上的"1"落在同一片靶标上
+        cv::putText(out.debug, "1", {ax + 8, ay + 16}, cv::FONT_HERSHEY_SIMPLEX, 0.7,
+                    cv::Scalar(0, 255, 0), 2, cv::LINE_AA);
+      }
+      if (okB) {
+        cv::circle(out.debug, {bx, by}, 6, cv::Scalar(0, 160, 0), cv::FILLED, cv::LINE_AA);
+        // 暗绿点 = 组 2（B），应与品红关键点组上的"2"落在同一片靶标上
+        cv::putText(out.debug, "2", {bx + 8, by + 16}, cv::FONT_HERSHEY_SIMPLEX, 0.7,
+                    cv::Scalar(0, 160, 0), 2, cv::LINE_AA);
+      }
     }
     char txt[256];
     const char *st = (out.status == 0)   ? "CONVERGING"
