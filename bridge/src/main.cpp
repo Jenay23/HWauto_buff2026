@@ -298,6 +298,7 @@ BridgeConfig load_config(const std::string &path) {
   bc.algo.filter_color = fs.getb("filter_color", true);
   bc.algo.filter_activation = fs.getb("filter_activation", true);
   bc.algo.dual_target = fs.getb("dual_target", true);
+  bc.algo.phase_ma_n = static_cast<int>(fs.getd("phase_ma_n", bc.algo.phase_ma_n));
   bc.algo.bullet_speed = fs.getd("bullet_speed", 22.0);
   bc.algo.gravity = fs.getd("gravity", 9.81);
   bc.algo.yaw_offset_deg = fs.getd("yaw_offset_deg", 0.0);

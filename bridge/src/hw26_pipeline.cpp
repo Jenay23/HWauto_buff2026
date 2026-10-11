@@ -230,6 +230,15 @@ struct Pipeline::Impl {
   std::vector<Eigen::Vector3f> prev_ts;
   std::vector<Eigen::Quaternionf> prev_qs;
   std::vector<float> prev_rolls;   // 上一帧两片各自的 roll（诊断用）
+  // 喂给 tracker 之前的相位滑动平均（低通）。存【解缠后】的相位，避免 2pi 处的假跳变。
+  std::deque<double> roll_hist;
+  double last_roll_raw = 0.0;
+  double last_roll_unwrapped = 0.0;
+  bool have_last_roll = false;
+  // 帧间隔（用于把滤波滞后换算成时间）
+  double prev_frame_t = 0.0;
+  bool have_prev_frame_t = false;
+  double dt_frame_ema = 0.033;
   // 由两片位置联合解出的圆心（符面系）。圆心是固定点，所以它的连续性极可靠，
   // 可以用来在"中垂线两支解"里选正确的那支。
   Eigen::Vector3f center_face = Eigen::Vector3f::Zero();
@@ -981,6 +990,23 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
         out.det_kpts = std::move(ordered);
       }
     }
+    // 6f-1) 相位低通（滑动平均 N 帧，解缠后平均）。目的见 Config::phase_ma_n 注释。
+    //       只在连续有观测的帧之间累计；一旦断帧（det=0）就清空，避免跨窗口平均。
+    if (I.cfg.phase_ma_n > 1) {
+      double raw = static_cast<double>(obs.roll);
+      double unw = raw;
+      if (I.have_last_roll) {
+        unw = I.last_roll_unwrapped + wrap_pi(raw - I.last_roll_raw);
+      }
+      I.last_roll_raw = raw;
+      I.last_roll_unwrapped = unw;
+      I.have_last_roll = true;
+      I.roll_hist.push_back(unw);
+      while (static_cast<int>(I.roll_hist.size()) > I.cfg.phase_ma_n) I.roll_hist.pop_front();
+      double acc = 0.0;
+      for (double v : I.roll_hist) acc += v;
+      obs.roll = static_cast<float>(wrap_pi(acc / static_cast<double>(I.roll_hist.size())));
+    }
     if (dis_ok) I.tracker->push(obs);
 
       // 6g) 诊断：两片 roll 的帧间变化（不依赖身份的最优配对）。
@@ -996,6 +1022,19 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
         out.droll_deg[1] = (straight ? a11 : a10) * 180.0 / M_PI;
       }
       I.prev_rolls = cur_rolls;
+  }
+
+  // 帧间隔（EMA）——用于把相位滤波的滞后换算成时间
+  if (I.have_prev_frame_t) {
+    const double dt = t_rel - I.prev_frame_t;
+    if (dt > 1e-4 && dt < 0.5) I.dt_frame_ema = 0.8 * I.dt_frame_ema + 0.2 * dt;
+  }
+  I.prev_frame_t = t_rel;
+  I.have_prev_frame_t = true;
+  // 断了观测就把相位历史清空（下次点亮重新开始，不跨窗口平均）
+  if (out.dual_targets == 0) {
+    I.roll_hist.clear();
+    I.have_last_roll = false;
   }
 
   // 7) 状态机推进（无论本帧是否有观测都要 update，与 HW26 example 一致）
@@ -1034,7 +1073,14 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   if (out.solved && trackable) {
     const double alg_lag =
         (I.cfg.alg_latency > 0.0) ? I.cfg.alg_latency : I.last_latency_ms / 1000.0;
-    const double base_lead = alg_lag + I.cfg.predict_time + I.cfg.gimbal_lead_time;
+    // 相位滤波带来的滞后：滑动平均 N 帧 -> 相位代表的是 (N-1)/2 帧之前的时刻，
+    // 所以预测时间要把这段补回去，否则会系统性晚 (N-1)/2*dt（N=6 时约 85ms）。
+    const double ma_lag =
+        (I.cfg.phase_ma_n > 1)
+            ? 0.5 * static_cast<double>(I.cfg.phase_ma_n - 1) * I.dt_frame_ema
+            : 0.0;
+    const double base_lead =
+        alg_lag + I.cfg.predict_time + I.cfg.gimbal_lead_time + ma_lag;
 
     // 关键：必须先把状态喂给 predictor，否则 predict_position 恒返回 (0,0,0)
     I.predictor->set_state(state, t_rel, t_rel);
