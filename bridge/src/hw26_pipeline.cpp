@@ -604,6 +604,14 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   if (!detected.empty()) {
     for (const auto &q : detected[0].keypoints)
       I.last_kpt.push_back(cv::Point2f(q.x(), q.y()));
+    // 青环（转盘中心 R）在 HW26 后端也要画。
+    // HW26 的 keypoints[8] 就是模型自己输出的 R center（前 8 个是八边形顶点）。
+    // 之前 have_rcenter 只在 sp25 分支置位，所以换到 hw26 后青环一直不显示。
+    if (detected[0].keypoints.size() > 8) {
+      const auto &rc = detected[0].keypoints[8];
+      I.last_rcenter = cv::Point2f(rc.x(), rc.y());
+      I.have_rcenter = true;
+    }
   }
   out.dets.reserve(detected.size());
   for (const auto &d : detected) {
