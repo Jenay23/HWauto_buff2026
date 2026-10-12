@@ -15,6 +15,31 @@
 
 #include "buff_algo/common/types.hpp"
 
+namespace {
+struct StageAcc {
+  static constexpr int kN = 4;
+  const char *names[kN] = {"letterbox", "infer", "decode", "draw"};
+  double acc[kN] = {0,0,0,0}; long cnt[kN] = {0,0,0,0}; long frames = 0;
+  std::chrono::steady_clock::time_point t;
+  void mark(int i) {
+    auto now = std::chrono::steady_clock::now();
+    if (i > 0) { acc[i-1] += std::chrono::duration<double,std::milli>(now-t).count(); ++cnt[i-1]; }
+    t = now;
+  }
+  void report(double lat) {
+    ++frames; if (frames % 100 != 0) return;
+    double sum = 0;
+    for (int i=0;i<kN;++i) sum += cnt[i] ? acc[i]/cnt[i] : 0.0;
+    std::printf("[stage] 每帧平均(ms):");
+    for (int i=0;i<kN;++i) std::printf(" %s=%.2f", names[i], cnt[i]?acc[i]/cnt[i]:0.0);
+    std::printf(" 其余=%.2f 合计=%.2f (lat=%.2f)\n", lat-sum, sum, lat);
+    std::fflush(stdout);
+    for (int i=0;i<kN;++i) { acc[i]=0; cnt[i]=0; }
+  }
+};
+StageAcc g_stage_acc;
+}
+
 namespace hw26_bridge {
 
 using buff_algo::Buff;
@@ -380,6 +405,7 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
                          float gimbal_yaw, float gimbal_pitch, float gimbal_roll) {
   auto &I = *impl_;
   const auto t_start = std::chrono::steady_clock::now();
+  g_stage_acc.mark(0);
   Output out;
 
   if (!I.have_anchor) {
@@ -535,12 +561,14 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   cv::Mat lb = buff_algo::letterbox_image(bgr, info, I.in_size);
   cv::Mat blob =
       cv::dnn::blobFromImage(lb, 1.0 / 255.0, I.in_size, cv::Scalar(), true, false, CV_32F);
+    g_stage_acc.mark(1);
 
   // 3) OpenVINO 推理（替代 TensorRT）
   ov::Tensor in_t(I.compiled.input().get_element_type(), I.compiled.input().get_shape(),
                   blob.ptr<float>());
   I.req.set_input_tensor(in_t);
   I.req.infer();
+    g_stage_acc.mark(2);
   const float *raw = I.req.get_output_tensor(0).data<const float>();
   // 全候选最大类别分（不做阈值），用于判断"离检出差多远"
   {
@@ -555,6 +583,7 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   }
   const auto detected =
       buff_algo::decode_detections(raw, kCandidateCount, kOutputColumns, info, I.dcfg);
+    g_stage_acc.mark(3);
   out.n_det = static_cast<int>(detected.size());
   // 可视化：把【每一个】检出的关键点都收进来（大符会有 2 组），
   // 而不是只画 detected[0] —— 后者是置信度最高的那个，两片靶标会互相超过，
@@ -1392,11 +1421,13 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
                 cv::LINE_AA);
   }
 
+  g_stage_acc.mark(4);
   const auto t_end = std::chrono::steady_clock::now();
   out.lead_s = lead;
   out.fly_s = fly;
   out.latency_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
   I.last_latency_ms = out.latency_ms;
+  g_stage_acc.report(out.latency_ms);
 
   // 10) 日志（含 ④ 日志里最有用的那些量，避免重犯"无日志"的错）
   if (I.log) {
