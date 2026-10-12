@@ -152,27 +152,41 @@ void LocalRuneTracker::fitAR() {
   std::vector<double> y;
   y.reserve(n);
   for (const auto &s : h_) y.push_back(s.roll);
+  // 去均值：相位绝对值可能离 0 很远，减掉均值能显著改善条件数
+  double mu = 0.0;
+  for (double v : y) mu += v;
+  mu /= n;
   Eigen::MatrixXd A(n - p, p);
   Eigen::VectorXd b(n - p);
   for (int k = p; k < n; ++k) {
-    for (int i = 0; i < p; ++i) A(k - p, i) = y[k - i - 1];
-    b(k - p) = y[k];
+    for (int i = 0; i < p; ++i) A(k - p, i) = y[k - i - 1] - mu;
+    b(k - p) = y[k] - mu;
   }
   Eigen::MatrixXd AtA = A.transpose() * A;
-  for (int i = 0; i < p; ++i) AtA(i, i) += 1e-9;
-  const Eigen::VectorXd c = AtA.ldlt().solve(A.transpose() * b);
-  if (!c.allFinite()) return;
+  const double tr = AtA.trace() / static_cast<double>(p);
+  const double ridge = 1e-6 * (tr > 0 ? tr : 1.0);   // 相对 ridge，脏数据下也能解
+  for (int i = 0; i < p; ++i) AtA(i, i) += ridge;
+  Eigen::VectorXd c = AtA.ldlt().solve(A.transpose() * b);
+  if (!c.allFinite()) {
+    // 拟合失败 -> 退化为"等速外推"：theta(k) = 2*theta(k-1) - theta(k-2)
+    ar_c_.clear();
+    ar_c_.push_back(2.0);
+    ar_c_.push_back(-1.0);
+    ar_p_ = 2;
+    rms_deg_ = -1.0;
+    locked_ = 1;
+    return;
+  }
   ar_c_.assign(c.data(), c.data() + p);
-  // 残差 -> rms_deg_
   double se = 0.0;
   for (int k = p; k < n; ++k) {
     double pr = 0.0;
-    for (int i = 0; i < p; ++i) pr += c(i) * y[k - i - 1];
+    for (int i = 0; i < p; ++i) pr += c(i) * (y[k - i - 1] - mu);
+    pr += mu;
     se += (y[k] - pr) * (y[k] - pr);
   }
   rms_deg_ = std::sqrt(se / std::max(1, n - p)) * 180.0 / kPi;
   locked_ = 1;
-  // 诊断用的速度/加速度
   const double dt = meanDt();
   if (n >= 3) {
     v_now_ = (y[n - 1] - y[n - 3]) / (2.0 * dt);
@@ -332,8 +346,8 @@ bool LocalRuneTracker::ready() const {
     return static_cast<int>(ar_c_.size()) > 0 && static_cast<int>(h_.size()) >= min_n_ &&
            span_deg_ >= min_span_deg_ && rms_deg_ >= 0.0 && rms_deg_ <= max_rms_deg_;
   }
-  if (mode_ == 5) {   // AR 裸预测：只要拟合出系数即可用（无 min_n / span / rms 门）
-    return static_cast<int>(ar_c_.size()) > 0;
+  if (mode_ == 5) {   // AR 裸预测：真正无门 —— 有 2 个样本就可用
+    return static_cast<int>(h_.size()) >= 2;
   }
   if (mode_ == 4) {   // AR + 物理包络：不用 rms 门（AR 拟合脏数据必然 rms 大），
                       // 安全性由 predict() 里的"速度不超过 2.090 rad/s"保证
@@ -373,7 +387,16 @@ bool LocalRuneTracker::predict(double t_future, double *roll_out) const {
     *roll_out = wrapPi(y.back());
     return true;
   }
-  if (mode_ == 5) {   // AR 裸预测：唯一约束 = 你给的两条参数范围隐含的 |v| <= 2.090 rad/s
+  if (mode_ == 5) {   // AR 裸预测
+    if (ar_c_.empty()) {   // 还没有系数 -> 等速外推（保证一定给得出结果）
+      if (h_.size() < 2) return false;
+      const auto &s1 = h_[h_.size() - 1];
+      const auto &s0 = h_[h_.size() - 2];
+      const double v = (s1.roll - s0.roll) / std::max(1e-6, s1.t - s0.t);
+      *roll_out = wrapPi(s1.roll + v * (t_future - s1.t));
+      return true;
+    }
+    // 以下为你指定参数范围隐含的唯一约束 = 你给的两条参数范围隐含的 |v| <= 2.090 rad/s
     const int p5 = static_cast<int>(ar_c_.size());
     if (p5 == 0 || static_cast<int>(h_.size()) < p5 + 1) return false;
     std::vector<double> y;
