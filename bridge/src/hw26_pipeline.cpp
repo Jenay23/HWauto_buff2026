@@ -1016,7 +1016,21 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
     // 6f-0b) 喂桥自己的局部相位 tracker（用【滤波前】的原始相位：
     //        它内部本来就是滑动窗口最小二乘，会自己平滑；喂平滑过的会叠加滞后）。
     if (I.cfg.local_tracker) {
-      I.local_trk.push(t_rel, static_cast<double>(obs.roll));
+      // 让 绿点 = 橙点的预测 成为恒等式：
+      //   以前把 PnP 的 roll 直接喂给局部 tracker，而橙点 meas_a_ch 是 PnP 解出的板心位置，
+      //   绿点又是理想圆上按 theta 外推的点 —— 两条不同几何路径，两者会偏几十像素。
+      //   现在改成：用橙点自己的位置反解出它绕转盘中心的角度 theta_A 再喂进去。
+      //   绿点公式 y = C.y - R*cos(theta), z = C.z + R*sin(theta)
+      //   => theta = atan2(z - C.z, C.y - y)
+      //   所以 predict() 的 theta_A(t+lead) 代回同一公式，就恒等于橙点 lead 秒后的位置。
+      double theta_feed = static_cast<double>(obs.roll);   // 兜底：中心或板心无效时用原 roll
+      if (out.meas_a_valid) {
+        const Eigen::Vector3f p_face = I.R_chassis_face.transpose() * out.meas_a_ch;
+        const double dy = static_cast<double>(I.center_face.y() - p_face.y());
+        const double dz = static_cast<double>(p_face.z() - I.center_face.z());
+        if (std::hypot(dy, dz) > 1e-3) theta_feed = std::atan2(dz, dy);
+      }
+      I.local_trk.push(t_rel, theta_feed);
       out.local_n = I.local_trk.n();
       out.local_ready = I.local_trk.ready() ? 1 : 0;
       out.local_w = I.local_trk.velocity();
