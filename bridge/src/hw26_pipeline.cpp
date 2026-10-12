@@ -1281,11 +1281,8 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       cv::circle(out.debug, {out.green_px_x, out.green_px_y}, 8, cv::Scalar(0, 255, 0),
                  cv::FILLED, cv::LINE_AA);
     }
-    // ---- 蓝点：当前枪管射线 ∩ 整个符所在平面（直径与绿点相同）----
-    if (out.blue_valid) {
-      cv::circle(out.debug, {out.blue_px_x, out.blue_px_y}, 8, cv::Scalar(255, 0, 0),
-                 cv::FILLED, cv::LINE_AA);
-    }
+    // ---- 蓝点（枪管射线 ∩ 符平面）已按用户要求【取消绘制】----
+    // 数据仍然计算（out.blue_px_* / blue_valid 保留，供日志与调试用），只是不画。
 
     // ---- 把检测到的东西画出来（让"在检测什么"可见）----
     // 多个检出各自一组颜色：第 1 组黄（与原行为一致），第 2 组品红，第 3 组起循环。
