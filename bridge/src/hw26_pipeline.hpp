@@ -122,6 +122,7 @@ struct Config {
   float second_score_ratio = 0.5f;   // ② 第二片 >= 该比例 × 最高分
   float min_sep_px = 60.0f;          // ③ 与第一片中心至少相距这么多像素（挡同片重叠框）
   int sp25_top2 = 1;                 // 0=只取一个（旧行为）1=允许两个
+  int identity_assoc = 1;            // 1=用关键点跨帧匹配定黄/品红身份（防跳变）
   float nms_threshold = 0.4f;
   // 是否启用 HW26 Selector 的两道过滤（关掉可用于诊断"检出但被过滤"）
   bool filter_color = true;
@@ -246,6 +247,8 @@ struct Output {
   double dbg_rcb_m = -1.0;
   // 选支诊断：两个候选圆心投影到图像后，各自与 sp25 模型自己输出的 R 中心的像素距离
   double cand_px[2] = {-1.0, -1.0};
+  double dbg_slot0_x = -1.0, dbg_slot0_y = -1.0;
+  double dbg_slot1_x = -1.0, dbg_slot1_y = -1.0;
   // 桥自己的局部相位 tracker 的诊断：样本数 / 是否 ready / 角速度 / 角加速度
   int local_n = 0;
   int local_ready = 0;

@@ -298,6 +298,7 @@ bc.algo.second_score_min = static_cast<float>(fs.getd("second_score_min", bc.alg
 bc.algo.second_score_ratio = static_cast<float>(fs.getd("second_score_ratio", bc.algo.second_score_ratio));
 bc.algo.min_sep_px = static_cast<float>(fs.getd("min_sep_px", bc.algo.min_sep_px));
 bc.algo.sp25_top2 = static_cast<int>(fs.getd("sp25_top2", bc.algo.sp25_top2));
+bc.algo.identity_assoc = static_cast<int>(fs.getd("identity_assoc", bc.algo.identity_assoc));
   bc.algo.nms_threshold = static_cast<float>(fs.getd("nms_threshold", 0.4));
   bc.algo.filter_color = fs.getb("filter_color", true);
   bc.algo.filter_activation = fs.getb("filter_activation", true);
