@@ -276,6 +276,8 @@ struct Output {
   int local_drop = 0;     // 因跳变被丢掉的帧数（只丢帧、不清窗）
   int local_lost = 0;
   int local_hit = 0;      // 连续 >= hit_s 秒无空窗 -> 判定命中
+  double local_theta = 0.0;  // 本帧实际喂进局部 tracker 的相位（rad）
+  int local_chord = 0;       // 1 = 该相位来自"弦相位"（圆心无关），0 = 来自圆心路径
   // ---- 可视化用（全部在【车体系】，方便直接喂 project_px）----
   // 关键：两片的实测板心要【分开】留着，否则看不出是哪一片坏了/被平均了
   bool meas_a_valid = false;

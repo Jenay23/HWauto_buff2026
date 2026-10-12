@@ -412,6 +412,9 @@ struct Pipeline::Impl {
   bool have_prev_frame_t = false;
   double dt_frame_ema = 0.033;
   LocalRuneTracker local_trk;   // 桥自己的局部相位 tracker（大符）
+  // 弦相位：两片靶心之差在符面内的方向角。用来给局部 tracker 喂相位（与圆心无关）。
+  double last_local_theta = 0.0;
+  bool have_last_local_theta = false;
   // 由两片位置联合解出的圆心（符面系）。圆心是固定点，所以它的连续性极可靠，
   // 可以用来在"中垂线两支解"里选正确的那支。
   Eigen::Vector3f center_face = Eigen::Vector3f::Zero();
@@ -514,7 +517,9 @@ Pipeline::Pipeline(const Config &cfg) : impl_(new Impl(cfg)) {
                //   reproj_px       max reprojection error of the PnP corners [px]
                //   gimbal_roll_deg gimbal roll (the CSV previously had yaw/pitch only)
                //   tilt_deg        angle between the face normal and the optical axis
-               "ex_m,reproj_px,gimbal_roll_deg,tilt_deg\n";
+               //   local_theta_rad 实际喂进局部 tracker 的相位（弦或圆心路径）
+               //   local_chord     1 = 该相位来自"弦相位"（圆心无关）
+               "ex_m,reproj_px,gimbal_roll_deg,tilt_deg,local_theta_rad,local_chord\n";
     }
   }
 }
@@ -1188,12 +1193,50 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       //   => theta = atan2(z - C.z, C.y - y)
       //   所以 predict() 的 theta_A(t+lead) 代回同一公式，就恒等于橙点 lead 秒后的位置。
       double theta_feed = static_cast<double>(obs.roll);   // 兜底：中心或板心无效时用原 roll
-      if (out.meas_a_valid) {
+      bool theta_from_chord = false;
+      // ★★★ 弦相位（创新，圆心无关）★★★
+      //   两片点亮的靶标刚性固连在同一转盘上，所以它们的连线向量也随转盘【刚体旋转】：
+      //       chord = p_B - p_A ∝ (sin η, cos η),  η = θ_A + Δ/2,  Δ = k·72°
+      //   => χ = atan2(chord_z, chord_y) = π/2 - η  =>  η = π/2 - χ
+      //   => 两个候选 θ = η ∓ Δ/2（它们都是真实点亮的靶标，任取其一都能打）。
+      //   好处：① 完全不需要圆心 C（绕开 §1.10 那套固定半径圆拟合及其误差）；
+      //        ② 两片位置做差，公共误差（距离/尺度偏差）自动抵消；
+      //        ③ 身份换片只会让候选整体平移 Δ，用"离上一帧最近"即可稳定消歧，
+      //           不会再像 PnP roll 那样每帧跳 180°/72°。
+      //   Δ 由弦长自身给出（对朝向免疫）：chord = 2R sin(Δ/2)。
+      if (is_face && have_t1 && out.meas_a_valid) {
+        const double dy = static_cast<double>(t1.y() - t0.y());
+        const double dz = static_cast<double>(t1.z() - t0.z());
+        const double chord_len = std::hypot(dy, dz);
+        const double step = 2.0 * M_PI / 5.0;
+        const double s = std::min(1.0, chord_len / (2.0 * static_cast<double>(r)));
+        int kk = static_cast<int>(std::lround(2.0 * std::asin(s) / step));
+        if (kk < 1) kk = 1;
+        if (kk > 2) kk = 2;
+        const double delta = kk * step;
+        const double chord_exp = 2.0 * static_cast<double>(r) * std::sin(0.5 * delta);
+        if (chord_len > 0.15 && std::abs(chord_len - chord_exp) < 0.18) {
+          const double eta = 0.5 * M_PI - std::atan2(dz, dy);
+          const double c1 = wrap_pi(eta - 0.5 * delta);
+          const double c2 = wrap_pi(eta + 0.5 * delta);
+          const double ref = (I.have_last_local_theta && I.local_trk.n() > 0)
+                                 ? I.last_local_theta
+                                 : static_cast<double>(obs.roll);
+          theta_feed = (std::abs(wrap_pi(c2 - ref)) < std::abs(wrap_pi(c1 - ref))) ? c2 : c1;
+          theta_from_chord = true;
+        }
+      }
+      if (!theta_from_chord && out.meas_a_valid) {
+        // 单片兜底：还是用圆心（老路径），保证单片也能工作
         const Eigen::Vector3f p_face = I.R_chassis_face.transpose() * out.meas_a_ch;
         const double dy = static_cast<double>(I.center_face.y() - p_face.y());
         const double dz = static_cast<double>(p_face.z() - I.center_face.z());
         if (std::hypot(dy, dz) > 1e-3) theta_feed = std::atan2(dz, dy);
       }
+      I.last_local_theta = theta_feed;
+      I.have_last_local_theta = true;
+      out.local_theta = theta_feed;
+      out.local_chord = theta_from_chord ? 1 : 0;
       I.local_trk.push(t_rel, theta_feed);
       out.local_n = I.local_trk.n();
       out.local_ready = I.local_trk.ready() ? 1 : 0;
@@ -1589,7 +1632,8 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
             << out.pitch * 180.0 / M_PI << ',' << out.fire_err << ',' << (out.control ? 1 : 0)
             << ',' << (out.fire ? 1 : 0) << ','
             << out.face_ex << ',' << out.reproj_px << ','
-            << gimbal_roll * 180.0 / M_PI << ',' << out.face_tilt_deg << '\n';
+            << gimbal_roll * 180.0 / M_PI << ',' << out.face_tilt_deg << ','
+            << out.local_theta << ',' << out.local_chord << '\n';
       I.log.flush();
     }
   }
