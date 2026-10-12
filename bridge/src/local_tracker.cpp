@@ -37,6 +37,7 @@ void LocalRuneTracker::reset() {
   v_now_ = a_now_ = omega_ = amp_ = 0.0;
   rms_deg_ = -1.0;
   span_deg_ = 0.0;
+  drop_run_ = 0;
   locked_ = free_locked_ = 0;
   ar_c_.clear();
   ekf_init_ = 0;
@@ -255,10 +256,23 @@ void LocalRuneTracker::ekfStep(double z) {
 
 // ======================= push / ready / predict =======================
 void LocalRuneTracker::push(double t, double roll) {
+  // 跳变卫兵（改）：原来一遇跳变就 reset() 清空【整个窗口】，
+  // 代价约 0.4~0.5 s（要重新攒够 min_n/span），而实测跳变每几帧就来一次 ->
+  // 窗口永远攒不起来（"拟合慢/拟合不出来"的直接原因）。
+  // 现在：跳变只丢【这一帧】（不更新 last_raw_/last_unwrapped_，窗口保留），
+  // 代价约 1 帧 (≈42 ms)。只有【连续】丢很多帧（说明真换了一次激活/长时间灭灯）
+  // 才清窗。
   if (have_last_) {
     const double jump = std::abs(wrapPi(roll - last_raw_)) * 180.0 / kPi;
-    if (jump > kMaxJumpDeg) reset();
+    if (jump > kMaxJumpDeg) {
+      ++jump_dropped_;
+      if (++drop_run_ > 30) {  // 连续丢 >30 帧 -> 认为换激活/长时间无有效数据
+        reset();
+      }
+      return;                  // ★ 不推入本帧，也不更新 last_*
+    }
   }
+  drop_run_ = 0;
   double unwrapped = roll;
   if (have_last_) unwrapped = last_unwrapped_ + wrapPi(roll - last_raw_);
   last_raw_ = roll;

@@ -46,6 +46,7 @@ class LocalRuneTracker {
   double rms_deg() const { return rms_deg_; }
   double span_deg() const { return span_deg_; }
   int ekf_rej() const { return ekf_rej_; }
+  int jump_dropped() const { return jump_dropped_; }
   int ekf_tot() const { return ekf_tot_; }
 
   void set_window(int n) { win_ = n; }
@@ -97,6 +98,8 @@ class LocalRuneTracker {
   double rms_deg_ = -1.0;
   double span_deg_ = 0.0;
   double dt_ema_ = 1.0 / 30.0;
+  int jump_dropped_ = 0;   // 因单帧跳变被丢弃的帧数（只丢帧，不清窗）
+  int drop_run_ = 0;       // 连续被丢的帧数
 
   // csine
   int locked_ = 0;

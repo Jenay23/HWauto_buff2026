@@ -249,6 +249,7 @@ struct Output {
   double local_amp = 0.0;     // 拟合出的角速度振幅 a（应落在 0.780~1.045）
   double local_rms_deg = -1.0;
   double local_span_deg = 0.0;
+  int local_drop = 0;      // 因跳变被丢掉的帧数（只丢帧不清窗）
   // ---- 可视化用（全部在【车体系】，方便直接喂 project_px）----
   // 关键：两片的实测板心要【分开】留着，否则看不出是哪一片坏了/被平均了
   bool meas_a_valid = false;
