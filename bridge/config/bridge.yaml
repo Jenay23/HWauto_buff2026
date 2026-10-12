@@ -122,7 +122,7 @@ local_tracker: 1
 #   1 = AR(4)（纯数据驱动，短程最好）
 #   2 = EKF（状态 [theta,a,w,phi]；离线实测不好，留作对比）
 #   3 = free（自由线性正弦；能拟合但会漂，兜底用）
-local_model: 4          # ★ AR + 物理包络：AR(4) + |delta_theta|<=2.090*dt 硬夹 + 均值速度检查（无 rms 门）
+local_model: 6          # ★ 三角函数模型查表 + 灭灯滑行 1.5s（无 rms 门）—— 唯一能覆盖空窗的档
 local_rms_gate_deg: 30      # 临时放宽 rms 门（默认 2.5°）；你的数据 rms 11~26°，不放宽就永远不 ready、看不到绿点
 
 # ---- 弹道 / 瞄准 ----
