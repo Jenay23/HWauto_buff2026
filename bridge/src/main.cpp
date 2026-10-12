@@ -297,6 +297,7 @@ BridgeConfig load_config(const std::string &path) {
 bc.algo.second_score_min = static_cast<float>(fs.getd("second_score_min", bc.algo.second_score_min));
 bc.algo.min_sep_px = static_cast<float>(fs.getd("min_sep_px", bc.algo.min_sep_px));
 bc.algo.sp25_top2 = static_cast<int>(fs.getd("sp25_top2", bc.algo.sp25_top2));
+bc.algo.detect_only = static_cast<int>(fs.getd("detect_only", bc.algo.detect_only));
 bc.algo.num_reverse = static_cast<int>(fs.getd("num_reverse", bc.algo.num_reverse));
   bc.algo.nms_threshold = static_cast<float>(fs.getd("nms_threshold", 0.4));
   bc.algo.filter_color = fs.getb("filter_color", true);

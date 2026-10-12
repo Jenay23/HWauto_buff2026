@@ -574,9 +574,12 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
         I.have_rcenter = true;
       }
       // 走两个后端共用的 PnP（物体点 0.127，见本函数开头的 solve_pose_ippe）
-      if (const auto pose =
-            solve_pose_ippe(det.kpt[0], det.kpt[1], det.kpt[2], det.kpt[3])) {
-        poses.push_back(*pose);
+      // detect_only：不跑 PnP -> poses 为空 -> 下游（相位/圆心/预测/弹道/云台/开火）全停
+      if (I.cfg.detect_only == 0) {
+        if (const auto pose =
+              solve_pose_ippe(det.kpt[0], det.kpt[1], det.kpt[2], det.kpt[3])) {
+          poses.push_back(*pose);
+        }
       }
     }
   } else {
@@ -588,7 +591,9 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
     const cv::Point2f &pb = I.ext_kpts[2];
     const cv::Point2f &pr = I.ext_kpts[3];
     for (const auto &q : I.ext_kpts) I.last_kpt.push_back(q);
-    if (const auto pose = solve_pose_ippe(pt, pl, pb, pr)) poses.push_back(*pose);
+    if (I.cfg.detect_only == 0) {
+      if (const auto pose = solve_pose_ippe(pt, pl, pb, pr)) poses.push_back(*pose);
+    }
     DetInfo di;
     di.color = I.cfg.buff_color;
     di.label = 0;
