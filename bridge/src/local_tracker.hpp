@@ -101,7 +101,8 @@ class LocalRuneTracker {
   int min_n_ = 12;
   double min_span_deg_ = 30.0;
   double max_rms_deg_ = 2.5;
-  double relock_rms_deg_ = 4.0;   // 超过它就重新搜 (a,w)（原来写死 4.0）
+  double relock_rms_deg_ = 4.0;
+  int tune_tick_ = 0;   // 超过它就重新搜 (a,w)（原来写死 4.0）
   double ridge_ = 1e-3;
   double v_now_ = 0.0;
   double a_now_ = 0.0;

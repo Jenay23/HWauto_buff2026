@@ -338,7 +338,7 @@ void LocalRuneTracker::push(double t, double roll) {
         double r = 0;
         const double keep_ref = t_ref_;
         t_ref_ = snap_t_;                    // 快照的相位基准必须一起用，否则相位会错
-        if (solveLinear(snap_a_, snap_w_, &c, &r) && r >= 0.0 && r <= 4.0) {
+        if (solveLinear(snap_a_, snap_w_, &c, &r) && r >= 0.0 && r * 180.0 / M_PI <= 4.0) {
           lock_a_ = snap_a_;
           lock_w_ = snap_w_;
           lin_c_ = c;
@@ -362,14 +362,43 @@ void LocalRuneTracker::push(double t, double roll) {
         }
       }
     } else if (mode_ == 6) {
-      // mode 6 锁定后【只重解线性部分、绝不重搜 (a,w)】—— 一次激活内它们固定
+      // 锁定后每帧重解线性部分；每 5 帧做一次局部微调。
+      // 为什么：锁定时的 (a,Omega) 可能不准（实测常被顶到网格下界 1.884/0.780），
+      // 而一次激活内又不能重来 —— 所以必须允许它慢慢收敛。
+      // 原则：只接受明显变好的结果，且永不回退到未锁定 —— 只会更准，不会乱跳。
       Eigen::Vector3d c;
       double r = 0;
       if (solveLinear(lock_a_, lock_w_, &c, &r)) {
         lin_c_ = c;
+        rms_deg_ = r * 180.0 / M_PI;
         lost_ = false;
         coasting_ = false;
         last_data_t_ = t;
+        if (++tune_tick_ >= 5) {
+          tune_tick_ = 0;
+          const double da = (kAHi - kALo) / kASteps;
+          const double dw = (kWHi - kWLo) / kWSteps;
+          for (int ia = -2; ia <= 2; ++ia) {
+            for (int iw = -2; iw <= 2; ++iw) {
+              if (ia == 0 && iw == 0) continue;
+              const double a2 = std::clamp(lock_a_ + ia * da, kALo, kAHi);
+              const double w2 = std::clamp(lock_w_ + iw * dw, kWLo, kWHi);
+              Eigen::Vector3d c2;
+              double r2 = 0;
+              if (!solveLinear(a2, w2, &c2, &r2)) continue;
+              if (r2 < r * 0.995) {
+                r = r2;
+                c = c2;
+                lock_a_ = a2;
+                lock_w_ = w2;
+                omega_ = w2;
+                amp_ = a2;
+              }
+            }
+          }
+          lin_c_ = c;
+          rms_deg_ = r * 180.0 / M_PI;
+        }
       }
     } else {
       Eigen::Vector3d c;
