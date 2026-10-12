@@ -188,6 +188,14 @@ struct Config {
   double fire_err_rad = 0.02;
   int fire_stable_frames = 3;
   double fire_cooldown = 1.0;
+  // 开火纪律（针对"空单"）：模拟器冷却 1.0 s 且 fire 被消费，桥若每帧都发
+  // fire=true，实际开火时刻就由模拟器冷却到期决定，桥的对准判定形同虚设。
+  // 实测开火命令 97% 间隔 <0.2s、开火时 status 有 261 帧是 CONVERGING(0)。
+  // 现在只在【预测可信】时允许开火：本地模型 ready、rms 小、样本够。
+  // 命中后换组时模型会短暂失锁 -> 自动停火，等重新锁定再打（正好治"打中了又打"）。
+  bool fire_require_lock = true;
+  double fire_rms_gate_deg = 15.0;
+  int fire_min_n = 15;
 
   RefFrame frame = RefFrame::kFace;
   // 符面法向的平滑系数（面系固定不动才好；符本身不动，所以可以很慢）

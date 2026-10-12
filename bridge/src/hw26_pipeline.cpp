@@ -1582,7 +1582,15 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       } else {
         I.align_run = 0;
       }
-      if (I.cfg.fire_enabled && I.align_run >= I.cfg.fire_stable_frames &&
+      // ★ 预测可信才允许开火：模型 ready、拟合 rms 小、样本够。
+      //   命中后换组 -> 模型门连续拒绝 -> reset -> ready=0，于是自动停火等重锁，
+      //   不再"打中了还继续往外打"。
+      const bool pred_confident =
+          !I.cfg.fire_require_lock ||
+          ((out.local_ready != 0) && out.local_rms_deg >= 0.0 &&
+           out.local_rms_deg <= I.cfg.fire_rms_gate_deg && out.local_n >= I.cfg.fire_min_n);
+      if (I.cfg.fire_enabled && pred_confident &&
+          I.align_run >= I.cfg.fire_stable_frames &&
           (t_rel - I.last_fire_t) >= I.cfg.fire_cooldown) {
         out.fire = true;
         I.align_run = 0;
