@@ -961,12 +961,12 @@ int main(int argc, char **argv) {
         std::printf(
             "[dual] droll=(%.1f,%.1f)deg pick=(%d,%d) dres=%.1fdeg chord=%.3fm "
             "rcd=%.2fm dlt=%.0f cand=(%.0f,%.0f)px | local n=%d rdy=%d rms=%.1fdeg "
-            "span=%.0fdeg w=%.2f LK=%d om=%.3f A=%.3f drop=%d lost=%d\n",
+            "span=%.0fdeg w=%.2f LK=%d om=%.3f A=%.3f drop=%d lost=%d hit=%d\n",
             out.droll_deg[0], out.droll_deg[1], out.sol_pick_t[0], out.sol_pick_t[1],
             out.dual_resid_deg, out.chord_m, out.dual_rcd_m, out.dual_delta_deg, out.cand_px[0],
             out.cand_px[1], out.local_n,
             out.local_ready, out.local_rms_deg, out.local_span_deg, out.local_w, out.local_locked, out.local_omega,
-            out.local_amp, out.local_drop, out.local_lost);
+            out.local_amp, out.local_drop, out.local_lost, out.local_hit);
         std::fflush(stdout);
       }
       if (max_frames > 0 && static_cast<int>(k) >= max_frames) {

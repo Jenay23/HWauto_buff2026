@@ -48,6 +48,8 @@ class LocalRuneTracker {
   int ekf_rej() const { return ekf_rej_; }
   int jump_dropped() const { return jump_dropped_; }
   bool lost() const { return lost_; }
+  bool hit_confirmed() const { return hit_confirmed_; }   // 连续 >=hit_s_ 有靶标 -> 视为命中
+  void on_dark(double t) { last_dark_t_ = t; hit_confirmed_ = false; reset(); }
   bool coasting() const { return coasting_; }
   int ekf_tot() const { return ekf_tot_; }
 
@@ -109,7 +111,14 @@ class LocalRuneTracker {
   bool coasting_ = false;
   mutable bool lost_ = false;   // mutable: predict() 是 const，超时要在里面置位
   double last_data_t_ = 0.0;
-  double coast_s_ = 1.5;   // 灭灯后继续外推的上限（= 亮灯 2.5s − 拟合 1s）
+  double coast_s_ = 1.5;
+  double hit_s_ = 2.6;     // 连续这么久都没进空窗 -> 判定命中（激活没结束）
+  bool hit_confirmed_ = false;
+  double last_dark_t_ = 0.0;
+  double no_dark_s_ = 0.0;
+  bool have_snapshot_ = false;      // 命中确认时的参数快照（当 warm start 用）
+  double snap_a_ = 0.0, snap_w_ = 0.0, snap_t_ = 0.0;
+  Eigen::Vector3d snap_c_ = Eigen::Vector3d::Zero();   // 灭灯后继续外推的上限（= 亮灯 2.5s − 拟合 1s）
   double fit_s_ = 1.0;     // 先攒够 1.0 s 数据，再做一次（较贵的）网格搜索
   int drop_run_ = 0;       // 连续被丢的帧数
 

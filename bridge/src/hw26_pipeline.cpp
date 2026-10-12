@@ -978,6 +978,7 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       out.local_span_deg = I.local_trk.span_deg();
       out.local_drop = I.local_trk.jump_dropped();
       out.local_lost = I.local_trk.lost() ? 1 : 0;
+      out.local_hit = I.local_trk.hit_confirmed() ? 1 : 0;
     }
 
     // 6f-1) 相位低通（滑动平均 N 帧，解缠后平均）。目的见 Config::phase_ma_n 注释。
@@ -1038,7 +1039,7 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   if (out.dual_targets == 0) {
     I.roll_hist.clear();
     I.have_last_roll = false;
-    I.local_trk.reset();   // 局部模型只对【连续】的一段负责
+    I.local_trk.on_dark(t_rel);   // 记录灭灯时刻（用于"连续无空窗=命中"判定）
   }
 
   // 7) 状态机推进（无论本帧是否有观测都要 update，与 HW26 example 一致）

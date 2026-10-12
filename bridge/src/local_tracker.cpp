@@ -286,6 +286,20 @@ void LocalRuneTracker::ekfStep(double z) {
 
 // ======================= push / ready / predict =======================
 void LocalRuneTracker::push(double t, double roll) {
+  // ★ 用户思路：如果连续 hit_s_ 秒都没有进入空窗（一直没有 det==0），
+  //   说明【刚打中了】—— 而命中恰恰证明"刚拟合出来的那组参数是对的"。
+  //   所以把它快照下来，之后不要从零重新拟合。
+  no_dark_s_ = t - last_dark_t_;
+  if (mode_ == 6 && no_dark_s_ >= hit_s_ && !hit_confirmed_) {
+    hit_confirmed_ = true;
+    if (locked_ != 0) {
+      snap_a_ = lock_a_;
+      snap_w_ = lock_w_;
+      snap_c_ = lin_c_;
+      snap_t_ = t_ref_;
+      have_snapshot_ = true;
+    }
+  }
   // 跳变卫兵（改）：原来一遇跳变就 reset() 清空【整个窗口】，
   // 代价约 0.4~0.5 s（要重新攒够 min_n/span），而实测跳变每几帧就来一次 ->
   // 窗口永远攒不起来（"拟合慢/拟合不出来"的直接原因）。
@@ -316,10 +330,36 @@ void LocalRuneTracker::push(double t, double roll) {
   if (mode_ == 0 || mode_ == 6) {         // csine / mode6(滑行)
     t_ref_ = 0.5 * (h_.front().t + h_.back().t);
     if (locked_ == 0) {
-      // mode 6：先攒够 fit_s_ 秒再做一次网格搜索（"推理用 1 s"）；期间不预测
-      const double span_s = h_.back().t - h_.front().t;
-      if (mode_ != 6 || span_s >= I_FIT_S_MIN) {
-        refitShape();
+      // ★ 有命中快照时：先用它试一次（参数很可能就是它）——成功就直接锁定，
+      //   不必再等 1 s、也不必再全范围搜索。失败则照旧走"攒 1 s + 网格搜索"。
+      bool snap_ok = false;
+      if (mode_ == 6 && have_snapshot_) {
+        Eigen::Vector3d c;
+        double r = 0;
+        const double keep_ref = t_ref_;
+        t_ref_ = snap_t_;                    // 快照的相位基准必须一起用，否则相位会错
+        if (solveLinear(snap_a_, snap_w_, &c, &r) && r >= 0.0 && r <= 4.0) {
+          lock_a_ = snap_a_;
+          lock_w_ = snap_w_;
+          lin_c_ = c;
+          locked_ = 1;
+          rms_deg_ = r;
+          omega_ = snap_w_;
+          amp_ = snap_a_;
+          lost_ = false;
+          coasting_ = false;
+          last_data_t_ = t;
+          snap_ok = true;
+        } else {
+          t_ref_ = keep_ref;
+        }
+      }
+      if (!snap_ok) {
+        // mode 6：先攒够 fit_s_ 秒再做一次网格搜索（"推理用 1 s"）；期间不预测
+        const double span_s = h_.back().t - h_.front().t;
+        if (mode_ != 6 || span_s >= I_FIT_S_MIN) {
+          refitShape();
+        }
       }
     } else if (mode_ == 6) {
       // mode 6 锁定后【只重解线性部分、绝不重搜 (a,w)】—— 一次激活内它们固定
