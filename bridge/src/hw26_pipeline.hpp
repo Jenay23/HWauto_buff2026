@@ -91,6 +91,7 @@ struct Config {
   DetectorKind detector = DetectorKind::kHw26;
   // 模型路径（yaml 的 model:）
   std::string model_path;
+  std::string device = "CPU";   // OpenVINO 设备名: CPU / GPU / AUTO / NPU
   // 打击板四点的半边长（相对扇叶中心），(0,0,±h),(0,±h,0)。
   // 两个模型的上/左/下/右四点指同一批物理点，所以共用。两个后端都走桥自实现的
   // PnP，不调用 HW26 的 Solver（它的 BUFF_POINTS=0.114 在模拟器上距离偏 10%）。

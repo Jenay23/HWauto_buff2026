@@ -260,6 +260,7 @@ BridgeConfig load_config(const std::string &path) {
 
   // 检测后端不再从配置读：只写一个 model: 路径，Pipeline 按模型的输出形状判定
   bc.algo.model_path = fs.gets("model", bc.algo.model_path);
+  bc.algo.device = fs.gets("device", bc.algo.device);
   bc.algo.blade_half_size = fs.getd("blade_half_size", bc.algo.blade_half_size);
   bc.algo.blade_half_size_hw26 =
       fs.getd("blade_half_size_hw26", bc.algo.blade_half_size_hw26);

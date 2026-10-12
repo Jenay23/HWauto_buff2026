@@ -302,13 +302,16 @@ Pipeline::Pipeline(const Config &cfg) : impl_(new Impl(cfg)) {
 
   // The HW26 model compile MUST stay outside the else above,
   // otherwise HW26 also takes the FATAL branch and the bridge exits at startup.
-  I.compiled = I.core.compile_model(model, "CPU");
+  I.compiled = I.core.compile_model(model, cfg.device);
+  { std::cout << "[hw26] OpenVINO device=" << cfg.device << "  available:";
+    for (const auto &d : I.core.get_available_devices()) std::cout << " " << d;
+    std::cout << std::endl; }
   I.req = I.compiled.create_infer_request();
   std::cout << "[hw26] detector=hw26(" << cfg.model_path
             << ")  (9 keypoints, colour + activation classified)" << std::endl;
 
   {
-    I.compiled = I.core.compile_model(model, "CPU");
+    I.compiled = I.core.compile_model(model, cfg.device);
     I.req = I.compiled.create_infer_request();
     std::cout << "[hw26] detector=hw26(" << cfg.model_path
               << ")  (9 keypoints, colour + activation classified)" << std::endl;
