@@ -332,6 +332,9 @@ bool LocalRuneTracker::ready() const {
     return static_cast<int>(ar_c_.size()) > 0 && static_cast<int>(h_.size()) >= min_n_ &&
            span_deg_ >= min_span_deg_ && rms_deg_ >= 0.0 && rms_deg_ <= max_rms_deg_;
   }
+  if (mode_ == 5) {   // AR 裸预测：只要拟合出系数即可用（无 min_n / span / rms 门）
+    return static_cast<int>(ar_c_.size()) > 0;
+  }
   if (mode_ == 4) {   // AR + 物理包络：不用 rms 门（AR 拟合脏数据必然 rms 大），
                       // 安全性由 predict() 里的"速度不超过 2.090 rad/s"保证
     return static_cast<int>(ar_c_.size()) > 0 && static_cast<int>(h_.size()) >= min_n_ &&
@@ -366,6 +369,26 @@ bool LocalRuneTracker::predict(double t_future, double *roll_out) const {
       double pr = 0.0;
       for (int i = 0; i < p; ++i) pr += ar_c_[i] * y[y.size() - i - 1];
       y.push_back(pr);
+    }
+    *roll_out = wrapPi(y.back());
+    return true;
+  }
+  if (mode_ == 5) {   // AR 裸预测：唯一约束 = 你给的两条参数范围隐含的 |v| <= 2.090 rad/s
+    const int p5 = static_cast<int>(ar_c_.size());
+    if (p5 == 0 || static_cast<int>(h_.size()) < p5 + 1) return false;
+    std::vector<double> y;
+    for (const auto &s5 : h_) y.push_back(s5.roll);
+    int steps5 = static_cast<int>(std::lround((t_future - h_.back().t) / dt));
+    if (steps5 < 0 || steps5 > 60) return false;
+    const double max_step5 = kMaxSpeed * dt;   // 2.090 rad/s * dt
+    for (int k = 0; k < steps5; ++k) {
+      double pr = 0.0;
+      for (int i = 0; i < p5; ++i) pr += ar_c_[i] * y[y.size() - i - 1];
+      const double prev = y.back();
+      double d = pr - prev;
+      if (d > max_step5) d = max_step5;        // ← 只这一条，别的都不要
+      if (d < -max_step5) d = -max_step5;
+      y.push_back(prev + d);
     }
     *roll_out = wrapPi(y.back());
     return true;
