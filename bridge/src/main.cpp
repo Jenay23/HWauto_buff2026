@@ -320,6 +320,7 @@ bc.algo.num_reverse = static_cast<int>(fs.getd("num_reverse", bc.algo.num_revers
   bc.algo.visualize = fs.getb("visualize", false);
   bc.algo.log_every = fs.geti("log_every", 30);
   bc.algo.console_every = fs.geti("console_every", bc.algo.console_every);
+  bc.algo.visualize_every = fs.geti("visualize_every", bc.algo.visualize_every);
   bc.algo.log_path = fs.gets("log_path", "hw26_bridge_log.csv");
   {
     const std::string fr = fs.gets("frame", "face");
@@ -708,6 +709,7 @@ int run_replay(const BridgeConfig &bc, const std::string &video_path, int max_fr
 
 }  // namespace
 
+static uint64_t g_vis_n = 0;   // visualize_every 用（显示帧计数）
 int main(int argc, char **argv) {
   std::signal(SIGINT, on_sigint);
   const std::string cfg_path = arg_value(argc, argv, "--config", "config/bridge.yaml");
@@ -889,7 +891,9 @@ int main(int argc, char **argv) {
       z_bytes_copy_from_buf(&b, reinterpret_cast<const uint8_t *>(js.data()), js.size());
       z_put(z_loan(s_img), z_loan(ke_cmd), z_move(b), NULL);
 
-      if (bc.algo.visualize && !out.debug.empty()) {
+      if (bc.algo.visualize && !out.debug.empty() &&
+                (bc.algo.visualize_every <= 1 || fire ||
+                 (++g_vis_n % static_cast<uint64_t>(bc.algo.visualize_every)) == 0)) {
         static bool vis_ok = true;
         if (vis_ok) {
           try {

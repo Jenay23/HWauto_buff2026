@@ -175,7 +175,8 @@ struct Config {
   bool refine_r_center = true;
   bool visualize = true;
   int log_every = 1;   // CSV 文件：必须 1（每帧一行）
-  int console_every = 10;   // 屏幕打印：每 N 帧一次（不影响 CSV）   // every frame: required for a 1:1 join on sim_t_ns
+  int console_every = 10;
+  int visualize_every = 1;  // 显示节流：1 = 每帧都显示（默认，保证不劣于面板）   // 屏幕打印：每 N 帧一次（不影响 CSV）   // every frame: required for a 1:1 join on sim_t_ns
   std::string log_path;  // 空则不打日志
 };
 
