@@ -11,7 +11,7 @@
 # 检不出符（输出满画面高置信度误检）。视场改成实车的 34.5° 之后重新实测，HW26 的
 # 模型能正常检出（点亮的大符帧上给出 2 个候选），所以切回 HW26 自己的模型。
 model: "../model/buff_ir.xml"              # HW26（9 关键点 -> 两片共 18 点）
-device: "CPU"                  # 推理设备 CPU/GPU/AUTO/NPU（改这里不用重编译）
+device: "GPU"                  # 推理设备 CPU/GPU/AUTO/NPU（编译失败会自动回退 CPU）
 
 # model: "../model/yolo11_buff_int8.xml"
 

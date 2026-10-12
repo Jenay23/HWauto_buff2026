@@ -40,6 +40,21 @@ struct StageAcc {
 StageAcc g_stage_acc;
 }
 
+namespace {
+// 设备编译的兜底：GPU/NPU 编译失败时自动退回 CPU，避免桥直接崩掉。
+template <typename T>
+inline ov::CompiledModel compile_with_fallback(ov::Core &core, const T &thing,
+                                               const std::string &dev) {
+  if (dev == "CPU") return core.compile_model(thing, dev);
+  try {
+    return core.compile_model(thing, dev);
+  } catch (const std::exception &e) {
+    std::cerr << "[hw26] 警告: 设备 " << dev << " 编译失败，自动回退 CPU: " << e.what() << std::endl;
+    return core.compile_model(thing, "CPU");
+  }
+}
+}  // namespace
+
 namespace hw26_bridge {
 
 using buff_algo::Buff;
@@ -327,7 +342,7 @@ Pipeline::Pipeline(const Config &cfg) : impl_(new Impl(cfg)) {
 
   // The HW26 model compile MUST stay outside the else above,
   // otherwise HW26 also takes the FATAL branch and the bridge exits at startup.
-  I.compiled = I.core.compile_model(model, cfg.device);
+  I.compiled = compile_with_fallback(I.core, model, cfg.device);
   { std::cout << "[hw26] OpenVINO device=" << cfg.device << "  available:";
     for (const auto &d : I.core.get_available_devices()) std::cout << " " << d;
     std::cout << std::endl; }
@@ -336,7 +351,7 @@ Pipeline::Pipeline(const Config &cfg) : impl_(new Impl(cfg)) {
             << ")  (9 keypoints, colour + activation classified)" << std::endl;
 
   {
-    I.compiled = I.core.compile_model(model, cfg.device);
+    I.compiled = compile_with_fallback(I.core, model, cfg.device);
     I.req = I.compiled.create_infer_request();
     std::cout << "[hw26] detector=hw26(" << cfg.model_path
               << ")  (9 keypoints, colour + activation classified)" << std::endl;
