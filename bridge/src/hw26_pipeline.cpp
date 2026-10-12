@@ -246,12 +246,8 @@ struct Pipeline::Impl {
   // 可以用来在"中垂线两支解"里选正确的那支。
   Eigen::Vector3f center_face = Eigen::Vector3f::Zero();
   bool have_center = false;
-  // 由模型 keypoints[8] 反投影、并在【车体系】里长 EMA 得到的固定圆心。
   // 依据：相位对圆心敏感度 1/0.7 ≈ 1.43 rad/m（圆心差 0.1m -> 相位差 8 度），
   // 而圆心是场上的固定点（激活内不动、车也不动），不该每帧重解。
-  Eigen::Vector3f Cch = Eigen::Vector3f::Zero();
-  bool Cch_valid = false;
-  int Cch_n = 0;
 
   std::unique_ptr<buff_algo::BuffSelector> selector;
   std::unique_ptr<buff_algo::BuffPnPSolver> solver;
@@ -630,14 +626,6 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   if (!detected.empty()) {
     for (const auto &q : detected[0].keypoints)
       I.last_kpt.push_back(cv::Point2f(q.x(), q.y()));
-    // 青环（转盘中心 R）在 HW26 后端也要画。
-    // HW26 的 keypoints[8] 就是模型自己输出的 R center（前 8 个是八边形顶点）。
-    // 之前 have_rcenter 只在 sp25 分支置位，所以换到 hw26 后青环一直不显示。
-    if (detected[0].keypoints.size() > 8) {
-      const auto &rc = detected[0].keypoints[8];
-      I.last_rcenter = cv::Point2f(rc.x(), rc.y());
-      I.have_rcenter = true;
-    }
   }
   out.dets.reserve(detected.size());
   for (const auto &d : detected) {
@@ -905,7 +893,7 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
           // 选支：**不再用"离上一帧圆心更近"** —— 那是双稳态，错一次就锁死在错的
           // 一支，两片相位整体偏 180 度（实测 ra 从 +1.571 跳到 -1.574，差正好 pi）。
           //
-          // 改用【模型自己输出的转盘中心像素】(keypoints[8]，管线前面已存进
+          // 改用【sp25 模型自己输出的 R 中心像素】(I.last_rcenter，来自 det->r_center）：
           // I.last_rcenter / I.have_rcenter)：把两个候选都投到图像，取离它更近的。
           // 为什么可行：两个候选在图像上相距约 57~293 像素（取决于槽距），而这里
           // 只需要二选一，模型中心几厘米的误差完全不影响判定；而精确圆心仍由
@@ -946,55 +934,6 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
           }
           I.center_face = Eigen::Vector3f(0.5f * (t0.x() + t1.x()), cc.x(), cc.y());
           I.have_center = true;
-          // ---- 用模型自己输出的圆心（每组关键点第 9 个 = keypoints[8]）----
-          // 反投影到符平面 -> 车体系 -> 长 EMA，得到【固定圆心】。
-          // 为什么不每帧重解：相位对圆心极敏感（δroll ≈ δC/0.7，0.1m -> 8 度），
-          // 而圆心是场上的固定点；keypoints[8] 是模型直接预测的圆心，与那 4 个
-          // 关键点【独立】，所以它可以放心地被重滤波（几何解做不到，它和相位同源）。
-          {
-            double mcx = 0.0, mcy = 0.0;
-            int mn = 0;
-            for (const auto &grp : out.det_kpts) {
-              if (grp.size() > 8) { mcx += grp[8].x; mcy += grp[8].y; ++mn; }
-            }
-            if (mn > 0) {
-              mcx /= mn;
-              mcy /= mn;
-              const double fx = I.cfg.camera_matrix.at<double>(0, 0);
-              const double fy = I.cfg.camera_matrix.at<double>(1, 1);
-              const double px0 = I.cfg.camera_matrix.at<double>(0, 2);
-              const double py0 = I.cfg.camera_matrix.at<double>(1, 2);
-              const Eigen::Vector3f d_cam(static_cast<float>((mcx - px0) / fx),
-                                          static_cast<float>((mcy - py0) / fy), 1.0f);
-              const Eigen::Vector3f d_ch = (R_cg * (R_camera2gimbal() * d_cam)).normalized();
-              const Eigen::Vector3f p0_ch = I.R_chassis_face * t0;  // 面上一点(车体系)
-              const Eigen::Vector3f n_ch = I.n_face.normalized();
-              const double denom = static_cast<double>(n_ch.dot(d_ch));
-              if (std::abs(denom) > 1e-6) {
-                // 射线原点用车体系原点近似（相机离它约 0.2m，而视线几乎垂直符面，
-                // 这个近似只带来几厘米的面内偏移）
-                const double sc = static_cast<double>(n_ch.dot(p0_ch)) / denom;
-                if (sc > 0.5) {
-                  const Eigen::Vector3f c_model_ch = d_ch * static_cast<float>(sc);
-                  if (!I.Cch_valid) {
-                    I.Cch = c_model_ch;
-                    I.Cch_n = 1;
-                    I.Cch_valid = true;
-                  } else {
-                    const int nn = std::min(I.Cch_n + 1, 100);  // 累积平均，饱和 100 帧
-                    I.Cch += (c_model_ch - I.Cch) / static_cast<float>(nn);
-                    I.Cch_n = nn;
-                  }
-                  out.dbg_c_diff_m = static_cast<double>(
-                      (I.Cch - (I.R_chassis_face *
-                                Eigen::Vector3f(0.5f * (t0.x() + t1.x()), cc.x(), cc.y())))
-                          .norm());
-                  out.dbg_c_model_n = I.Cch_n;
-                  I.center_face = Rc2f * I.Cch;  // 用固定圆心覆盖几何解
-                }
-              }
-            }
-          }
           // 合成观测：z 轴取 (t - C)/r —— 天然落在符面内（x≈0），
           // 于是 HW26 的固定平面前提【自动满足】，且 Buffalo 算出的 R_center 就等于 C
           auto mk_obs = [&](const Eigen::Vector3f &tt) -> Pose3f {

@@ -224,8 +224,6 @@ struct Output {
   //   隔一槽位(144 度) 应为 2*0.7*sin(72) = 1.331 m
   // 它与 dlt 是否一致，是判断"两片确实固连在同一转盘上"的直接证据。
   double chord_m = -1.0;
-  double dbg_c_diff_m = -1.0;   // |模型圆心 - 几何圆心|（车体系，米）
-  int dbg_c_model_n = 0;        // 模型圆心已累积帧数
   // ---- 组号/身份诊断（定位「黄/品红为什么会换」）----
   int dbg_pose0_is_a = -1;   // A/B 判定：1 = poses[0] 是 A
   int dbg_src_a = -1;        // 组 0（黄）来自哪个检出下标
@@ -240,7 +238,7 @@ struct Output {
   double dbg_roll_b = 0.0;
   double dbg_rca_m = -1.0;   // 两片各自解出的 R_center 距离
   double dbg_rcb_m = -1.0;
-  // 选支诊断：两个候选圆心投影到图像后，各自与模型中心(keypoints[8])的像素距离
+  // 选支诊断：两个候选圆心投影到图像后，各自与 sp25 模型自己输出的 R 中心的像素距离
   double cand_px[2] = {-1.0, -1.0};
   // 桥自己的局部相位 tracker 的诊断：样本数 / 是否 ready / 角速度 / 角加速度
   int local_n = 0;
