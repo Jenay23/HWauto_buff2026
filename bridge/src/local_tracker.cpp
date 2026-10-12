@@ -18,7 +18,7 @@ constexpr int kASteps = 24;
 constexpr int kWSteps = 10;
 constexpr double kRidge = 1e-6;
 constexpr double kLockRmsDeg = 2.0;
-constexpr double kRelockRmsDeg = 4.0;
+// （重锁门改成了成员 relock_rms_deg_，可由配置设置）
 
 double wrapPi(double a) {
   while (a > kPi) a -= 2.0 * kPi;
@@ -378,7 +378,7 @@ void LocalRuneTracker::push(double t, double roll) {
         lin_c_ = c;
         lost_ = false; coasting_ = false; last_data_t_ = t;
         rms_deg_ = r * 180.0 / kPi;
-        if (rms_deg_ > kRelockRmsDeg) { locked_ = 0; refitShape(); }
+        if (rms_deg_ > relock_rms_deg_) { locked_ = 0; refitShape(); }
       }
     }
     if (locked_) {

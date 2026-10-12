@@ -122,7 +122,8 @@ local_tracker: 1
 #   1 = AR(4)（纯数据驱动，短程最好）
 #   2 = EKF（状态 [theta,a,w,phi]；离线实测不好，留作对比）
 #   3 = free（自由线性正弦；能拟合但会漂，兜底用）
-local_model: 4          # AR + 物理包络（|v|<=2.090 硬夹 + 均值检查）；对比 mode6 的物理查表
+local_model: 0          # ★ csine：三角函数速度模型 v=a*sin(wt)+2.090-a，VarPro(Ω 网格+线性解) 拟合
+local_rms_gate_deg: 30      # 临时放宽 rms 门（默认 2.5°）；你的数据 rms 11~26°，不放宽就永远不 ready、看不到绿点
 
 # ---- 弹道 / 瞄准 ----
 bullet_speed: 22.0          # 模拟器弹速 m/s

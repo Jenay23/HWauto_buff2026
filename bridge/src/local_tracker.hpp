@@ -57,6 +57,8 @@ class LocalRuneTracker {
   void set_min_samples(int n) { min_n_ = n; }
   void set_min_span_deg(double d) { min_span_deg_ = d; }
   void set_max_rms_deg(double d) { max_rms_deg_ = d; }
+  void set_relock_rms_deg(double d) { relock_rms_deg_ = d; }
+  void set_rms_gates(double d) { max_rms_deg_ = d; relock_rms_deg_ = d; }
   void set_ridge(double r) { ridge_ = r; }
   void set_mode(int m) {
     mode_ = m;
@@ -99,6 +101,7 @@ class LocalRuneTracker {
   int min_n_ = 12;
   double min_span_deg_ = 30.0;
   double max_rms_deg_ = 2.5;
+  double relock_rms_deg_ = 4.0;   // 超过它就重新搜 (a,w)（原来写死 4.0）
   double ridge_ = 1e-3;
   double v_now_ = 0.0;
   double a_now_ = 0.0;
