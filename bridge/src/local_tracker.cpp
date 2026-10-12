@@ -10,7 +10,8 @@ constexpr double kMaxJumpDeg = 12.0;   // 单帧相位跳变上限 -> 清窗口
 constexpr double kALo = 0.780, kAHi = 1.045;
 constexpr double kWLo = 1.884, kWHi = 2.000;
 constexpr double kMean = 2.090;
-constexpr double kMaxSpeed = 2.090;     // 绝对约束: v_max = 2.090 rad/s（与 a 无关）
+constexpr double kMaxSpeed = 2.090;
+constexpr double I_FIT_S_MIN = 1.0;   // mode6: 攒够 1 s 才做一次网格搜索     // 绝对约束: v_max = 2.090 rad/s（与 a 无关）
 constexpr double kMeanSpeedLo = 1.045;  // = 2.090 - 1.045
 constexpr double kMeanSpeedHi = 1.310;  // = 2.090 - 0.780        // 官方: speed = a*sin(w t+phi) + (2.090-a)
 constexpr int kASteps = 24;
@@ -38,7 +39,7 @@ void LocalRuneTracker::reset() {
   // mode 6（滑行）：灭灯时保留拟合参数，只清样本 -> 之后用解析式继续外推。
   // 依据：模拟器里一组 (a, w) 一次激活只抽一次、之后不变（power_rune.rs），
   // 所以亮灯期拟合的模型在灭灯期依然有效 —— 这是物理延续，不是猜测。
-  if (mode_ == 6 && locked_ != 0) {
+  if (mode_ == 6 && locked_ != 0 && !lost_) {   // 未超时 -> 滑行；已 lost -> 落到下面完整重置
     if (!h_.empty()) last_data_t_ = h_.back().t;
     h_.clear();
     have_last_ = false;
@@ -315,7 +316,21 @@ void LocalRuneTracker::push(double t, double roll) {
   if (mode_ == 0 || mode_ == 6) {         // csine / mode6(滑行)
     t_ref_ = 0.5 * (h_.front().t + h_.back().t);
     if (locked_ == 0) {
-      refitShape();
+      // mode 6：先攒够 fit_s_ 秒再做一次网格搜索（"推理用 1 s"）；期间不预测
+      const double span_s = h_.back().t - h_.front().t;
+      if (mode_ != 6 || span_s >= I_FIT_S_MIN) {
+        refitShape();
+      }
+    } else if (mode_ == 6) {
+      // mode 6 锁定后【只重解线性部分、绝不重搜 (a,w)】—— 一次激活内它们固定
+      Eigen::Vector3d c;
+      double r = 0;
+      if (solveLinear(lock_a_, lock_w_, &c, &r)) {
+        lin_c_ = c;
+        lost_ = false;
+        coasting_ = false;
+        last_data_t_ = t;
+      }
     } else {
       Eigen::Vector3d c;
       double r = 0;

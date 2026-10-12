@@ -104,7 +104,8 @@ class LocalRuneTracker {
   bool coasting_ = false;
   mutable bool lost_ = false;   // mutable: predict() 是 const，超时要在里面置位
   double last_data_t_ = 0.0;
-  double coast_s_ = 1.2;
+  double coast_s_ = 1.5;   // 灭灯后继续外推的上限（= 亮灯 2.5s − 拟合 1s）
+  double fit_s_ = 1.0;     // 先攒够 1.0 s 数据，再做一次（较贵的）网格搜索
   int drop_run_ = 0;       // 连续被丢的帧数
 
   // csine
