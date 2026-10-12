@@ -1490,11 +1490,13 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
     const int cy = static_cast<int>(std::lround(I.cfg.camera_matrix.at<double>(1, 2)));
 
     // ---- 紫点：未来打击点（预测命中点）----
-    // 颜色按用户要求由绿改紫（BGR 240,32,160 = RGB 160,32,240）。
+    // 颜色按用户要求由绿改紫（BGR 240,32,160 = RGB 160,32,240）；
+    // 按用户要求改成【空心】且直径更大：r=14（直径 28，原 r=8 实心）、线宽 3。
+    // 空心时判读依据是【圆环中心】。
     // 注意：本文件其余注释与日志里仍把它叫"绿点"，指的是同一个点。
     if (out.green_px_x > 0) {
-      cv::circle(out.debug, {out.green_px_x, out.green_px_y}, 8, cv::Scalar(240, 32, 160),
-                 cv::FILLED, cv::LINE_AA);
+      cv::circle(out.debug, {out.green_px_x, out.green_px_y}, 14, cv::Scalar(240, 32, 160), 3,
+                 cv::LINE_AA);
     }
     // ---- 蓝点（枪管射线 ∩ 符平面）已按用户要求【取消绘制】----
     // 数据仍然计算（out.blue_px_* 保留，供日志与调试用），只是不画。
