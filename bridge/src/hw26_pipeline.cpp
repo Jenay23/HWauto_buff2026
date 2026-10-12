@@ -1434,6 +1434,13 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
           cv::circle(out.debug, {static_cast<int>(d.x), static_cast<int>(d.y)}, 4, col,
                      cv::FILLED, cv::LINE_AA);
         }
+        // 【模型直接给出的扇叶中心 kpt[4]】用橙色单独叠画一遍（组色之上）：
+        //   与下面"PnP 重投影板心"（亮蓝）对照 —— 重合说明 PnP 正确，分开说明 PnP 有问题。
+        if (out.det_kpts[g].size() > 4) {
+          const cv::Point2f &kc = out.det_kpts[g][4];
+          cv::circle(out.debug, {static_cast<int>(kc.x), static_cast<int>(kc.y)}, 4,
+                     cv::Scalar(0, 165, 255), cv::FILLED, cv::LINE_AA);   // 橙
+        }
         // 编号：默认 1 = A（相位靠前 = 先打的那片）；num_reverse=1 时两组编号对调。
         if (!out.det_kpts[g].empty()) {
           const cv::Point2f &p0 = out.det_kpts[g].front();
@@ -1458,8 +1465,10 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       int ax = -1, ay = -1, bx = -1, by = -1;
       const bool okA = out.meas_a_valid && proj_ch(out.meas_a_ch, &ax, &ay);
       const bool okB = out.meas_b_valid && proj_ch(out.meas_b_ch, &bx, &by);
-      // 两个板心点用【同一个绿】，不再靠亮/暗区分身份（身份由旁边的编号 1/2 表达）。
-      const cv::Scalar kCenterDot(0, 255, 0);
+      // 两个板心点 = 【PnP 三维板心的重投影】，用同一个【亮蓝】；
+      // 橙色点 = 模型直接给的 kpt[4]。两者重合 -> PnP 正确；分开 -> PnP/物体点有问题。
+      // （用亮蓝(255,160,0) 而不是纯蓝，纯蓝已经被"枪管射线∩平面"的蓝点占用。）
+      const cv::Scalar kCenterDot(255, 160, 0);
       if (okA) {
         cv::circle(out.debug, {ax, ay}, 6, kCenterDot, cv::FILLED, cv::LINE_AA);
         // 组号写在板心点旁：应与第 1 组关键点上的"1"落在同一片靶标上
