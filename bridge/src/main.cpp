@@ -908,7 +908,7 @@ int main(int argc, char **argv) {
       // 有检出时打印类别明细（限流），用于诊断"检出但被过滤"
       if (out.n_det > 0) {
         static uint64_t det_print = 0;
-        if (det_print++ % 5 == 0) {
+        if (det_print++ % static_cast<uint64_t>(std::max(1, bc.algo.console_every)) == 0) {
           std::string ds;
           for (const auto &d : out.dets) {
             char b[96];
@@ -928,7 +928,7 @@ int main(int argc, char **argv) {
         std::fflush(stdout);
       }
       const uint64_t k = ++processed;
-      if (fire || out.n_det != 1 || k % 30 == 0) {
+      if (fire || k % static_cast<uint64_t>(std::max(1, bc.algo.console_every)) == 0) {
         std::printf(
             "[bridge] #%llu age=%.0fms det=%d sel=%d solved=%d q=%d st=%d dis=%.2f "
             "roll=%.3f w=%.3f lead=%.3f lat=%.1fms cmd=(%.2f,%.2f) err=%.4f ctrl=%d fire=%d "
@@ -944,7 +944,7 @@ int main(int argc, char **argv) {
       //   p0a 在跳                -> A/B 翻了，绿点其实也在跳
       //   p0a 稳但 sa/sb 在跳      -> 组号映射在变
       //   两者都稳而画面还变        -> 变的是别的东西（顶点顺序 / 绘制）
-      if (out.n_det > 0) {
+      if (out.n_det > 0 && (fire || k % static_cast<uint64_t>(std::max(1, bc.algo.console_every)) == 0)) {
         std::printf(
             "[grp] nt=%d ndet=%d nsel=%d nk=%zu p0a=%d sa=%d sb=%d conf=(%.2f,%.2f) "
             "g0=(%.0f,%.0f) g1=(%.0f,%.0f) ra=%.3f rb=%.3f rca=%.2f rcb=%.2f\n",
