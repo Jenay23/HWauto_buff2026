@@ -14,9 +14,11 @@
 
 #include <array>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -137,9 +139,27 @@ struct Config {
   // 打开后：即使 HW26 的 tracker 还没到 TRACKING（st=0），只要局部拟合够样本
   // （默认 6 个，约 0.2~0.3 s）就能给出预测命中点。HW26 到 TRACKING 后仍优先用它。
   int local_tracker = 1;
-  double local_rms_gate_deg = 2.5;
-  double local_coast_s = 0.2;   // 灭灯多久之内允许滑行；超过就清空参数（真灭灯）  // 局部估计器的 rms 门（含重锁门）；调大可让脏数据也出预测
-  int local_model = 0;   // 0=csine 1=AR 2=EKF 3=free
+  double local_rms_gate_deg = 2.5;  // 局部估计器的 rms 门（含重锁门）；调大可让脏数据也出预测
+  double local_coast_s = 0.2;       // 灭灯多久之内允许滑行；超过就清空参数（真灭灯）
+  int local_model = 0;   // 0=csine 1=AR 2=EKF 3=free 4=AR+包络 5=裸AR 6=查表+滑行
+
+  // ---- 转盘圆心 C 的来源 ----
+  // 圆心 C 是"相位 → 打击点"的唯一基准：roll = atan2(t.z-C.z, C.y-t.y)，
+  // 预测点 = (C.x, C.y - R cosθ, C.z + R sinθ)。所以 C 错了，一切都跟着错。
+  //   0 = dual：由【两片位置 + 半径 0.7 硬约束】联立解中垂线交点（原来的做法）。
+  //             好处是第一帧就有；坏处是另一片的位置会进到这一片的结算里 ——
+  //             实测两片的面外间距（= 诊断量 rcd = |t0.x - t1.x|）可达 0.60 m。
+  //   1 = single_history：只用一片的【历史 t】做"已知半径 0.7"的圆拟合。
+  //             彻底切断两片互相污染，并能把该片自己 IPPE 翻转那几帧当外点剔掉。
+  //             代价：要攒够 center_hist_min 个样本才建得起来；
+  //             在此之前自动回退到 0（dual），所以不会比原来差。
+  //   （曾经用过的"由 PnP 朝向反推"已废弃：四个物点构成正方形，绕法向有 4 重退化，
+  //     实测分歧 0.8~1.6 m，所以这里不再提供这一档。）
+  int center_source = 0;
+  int center_hist_min = 8;            // 圆拟合所需最少样本数
+  double center_hist_span_m = 0.05;   // 样本在面内的最小跨度（弧太短 -> 法方程病态）
+  double center_hist_gate_m = 0.15;   // 外点门：||t-C| - 0.7| 超过它就当外点剔除
+  double center_hist_keep_s = 8.0;    // 历史只保留最近这么久（圆心静止，限内存而已）
 
   // 弹道 / 瞄准
   double bullet_speed = 22.0;      // 模拟器弹速
@@ -213,6 +233,13 @@ struct Output {
                                 // 并不是隔着整数个槽位，"刚性固连"的假设不成立
   double dual_rcd_m = -1.0;     // 两片各自解出的 R_center 分歧：同一转盘应只有几 cm。
                                 // 大了说明其中一片的位姿不自洽 -> 不能融合
+  // 圆心 C 的来源与拟合质量（center_source=1 时才有意义）
+  //   center_src: 0 = 两片联立（dual）, 1 = 单片历史圆拟合
+  //   center_n  : 圆拟合实际用到的样本数（剔除外点后）
+  //   center_rms_m: 圆拟合残差 rms（米）。应 ~1e-2；大了说明样本脏或跨度不足
+  int center_src = 0;
+  int center_n = 0;
+  double center_rms_m = -1.0;
   // 诊断（不依赖身份）：本帧两片 roll 与上一帧两片 roll 做【最优配对】后的两个残差。
   // 某一对接近 180 度 = 那片发生了 IPPE 双解翻转（相位被翻到对面去了）。
   double droll_deg[2] = {0.0, 0.0};
@@ -299,5 +326,19 @@ class Pipeline {
 // d 水平距离(m), h 相对高度(m), v0 初速(m/s)
 bool solve_ballistic_no_drag(double d, double h, double v0, double g,
                              double *pitch_up_rad, double *fly_time_s);
+
+// 固定半径圆的圆心拟合（Config::center_source == 1 时用；定义在 hw26_pipeline.cpp）。
+//   hist      : (t_rel, t_chassis) 的历史；t_chassis 是【车体系】位置
+//   Rc2f      : 车体系 -> 符面系 的旋转
+//   radius    : 硬约束半径（= consts::BUFF_RADIUS = 0.7）
+//   min_n / min_span_m : 最少样本数、样本在面内的最小跨度（太短则法方程病态）
+//   gate_m    : 外点门 ||t-C| - radius|，超出的样本剔除（模拟 IPPE 翻转那几帧）
+//   t_now/keep_s: 只保留最近 keep_s 秒的样本
+// 成功返回 true，并写出圆心（符面系）、实际参与拟合的样本数、残差 rms（米）。
+// 只对 (C_y, C_z, k) 做线性最小二乘，所以没有"中垂线两支"的二义性。
+bool fit_fixed_radius_center(
+    const std::deque<std::pair<double, Eigen::Vector3f>> &hist, const Eigen::Matrix3f &Rc2f,
+    double radius, int min_n, double min_span_m, double gate_m, double t_now, double keep_s,
+    Eigen::Vector3f *c_out, int *n_out, double *rms_out);
 
 }  // namespace hw26_bridge

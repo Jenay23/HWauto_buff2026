@@ -5,9 +5,12 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <deque>
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <utility>
+#include <vector>
 
 #include <opencv2/calib3d.hpp>
 #include <opencv2/dnn.hpp>
@@ -173,6 +176,172 @@ buff_tracker:
 
 }  // namespace
 
+// ============================================================================
+// 固定半径圆的圆心拟合（center_source=1 用）
+// ============================================================================
+// 只拿【一片】靶标的历史位置 t（车体系）来解转盘圆心 C。
+//
+// 原理：|t - C| = R 是硬约束（R = 0.7 m，即 consts::BUFF_RADIUS）。展开：
+//     |t|² - 2 t·C + |C|² = R²  ->  2 t_y·C_y + 2 t_z·C_z - k = |t|²
+// 其中 k = |C|² - R²。于是对 (C_y, C_z, k) 是**线性**最小二乘 —— 不需要迭代、
+// 不需要初值；而且样本 ≥3（实际要求更多）后就没有"中垂线两支"的二义性：
+// 两支里只有一支能同时满足所有样本。
+//
+// 为什么不用 PnP 朝向反推：四个物点 (0,0,±h),(0,±h,0) 构成正方形，绕法向每转
+// 90° 自重合 -> 面内朝向有 4 重退化，实测两片由此解出的圆心分歧 0.8~1.6 m。
+// 位置 t 没有这个退化。
+//
+// 外点剔除：该片自己发生 IPPE 双解翻转的那几帧，t 会明显偏离圆，必须稳住。
+// 用 **IRLS（迭代重加权最小二乘，Cauchy 权）** 而不是"一次最小二乘 + 硬残差门"：
+// 后者会被外点整体拽偏，于是连正常点的残差都超门，结果把好点也一起剔掉
+// （实测 40 点里 5 个 0.3 m 的外点就只剩 14 个、圆心偏 0.4 m）。
+// 也不用 RANSAC：本模型的三点最小集会把"半径 0.7"当成自由量（3 未知量 3 方程），
+// 假设半径不受约束、噪声放大严重，抽出来的圆心本身就飘。
+// IRLS 保留了线性结构，靠尺度自适应的权重把外点压下去，不需要任何初值。
+bool fit_fixed_radius_center(
+    const std::deque<std::pair<double, Eigen::Vector3f>> &hist, const Eigen::Matrix3f &Rc2f,
+    double radius, int min_n, double min_span_m, double gate_m, double t_now, double keep_s,
+    Eigen::Vector3f *c_out, int *n_out, double *rms_out) {
+  // 投影到【当前】面系。历史存的是车体系坐标，所以面系法向的缓慢更新会自动
+  // 作用到整段历史上（不会因为 n 漂移而把历史算歪）。
+  std::vector<Eigen::Vector3f> p;
+  p.reserve(hist.size());
+  for (const auto &h : hist) {
+    if (keep_s > 0.0 && (t_now - h.first) > keep_s) continue;
+    p.push_back(Rc2f * h.second);
+  }
+  const int n = static_cast<int>(p.size());
+  if (n < min_n) return false;
+
+  // 弧太短 -> 在"垂直于弦"的方向上病态，解出来的圆心会飞。先查跨度。
+  double span = 0.0;
+  for (int i = 0; i < n; ++i) span = std::max(span, static_cast<double>((p[i] - p[0]).norm()));
+  if (span < min_span_m) return false;
+
+  auto resid = [&](int i, double cy, double cz) {
+    return std::abs(std::hypot(p[i].y() - cy, p[i].z() - cz) - radius);
+  };
+  // 加权线性最小二乘（3 个未知量：(C_y, C_z, k)）；w 为空表示等权
+  auto wls = [&](const std::vector<double> &w, double *cy, double *cz, double *rms,
+                 const std::vector<int> *subset) {
+    Eigen::Matrix3d A = Eigen::Matrix3d::Zero();
+    Eigen::Vector3d b = Eigen::Vector3d::Zero();
+    double wsum = 0.0;
+    for (int i = 0; i < n; ++i) {
+      if (subset && std::find(subset->begin(), subset->end(), i) == subset->end()) continue;
+      const double wi = w.empty() ? 1.0 : w[i];
+      if (wi <= 0.0) continue;
+      const double y = p[i].y(), z = p[i].z();
+      const Eigen::Vector3d phi(2.0 * y, 2.0 * z, -1.0);
+      A += wi * phi * phi.transpose();
+      b += wi * phi * (y * y + z * z);
+      wsum += wi;
+    }
+    if (wsum <= 0.0) return false;
+    A.diagonal().array() += 1e-9;  // 轻微 ridge：样本几乎共线时也不炸
+    const Eigen::Vector3d s = A.ldlt().solve(b);
+    if (!s.allFinite()) return false;
+    *cy = s(0);
+    *cz = s(1);
+    double se = 0.0;
+    double cnt = 0.0;
+    for (int i = 0; i < n; ++i) {
+      if (subset && std::find(subset->begin(), subset->end(), i) == subset->end()) continue;
+      const double d = resid(i, *cy, *cz);
+      se += d * d;
+      cnt += 1.0;
+    }
+    *rms = std::sqrt(se / std::max(1.0, cnt));
+    return true;
+  };
+
+  // ---- 初始等权最小二乘 ----
+  double cy = 0.0, cz = 0.0, rms = 0.0;
+  if (!wls({}, &cy, &cz, &rms, nullptr)) return false;
+
+  // ---- 鲁棒 Gauss-Newton：直接对【真实残差】|t-C| - R 做 Cauchy 加权 ----
+  // 注意不能拿线性化模型的残差当权重：那套参数化把半径当自由量，权重与真实
+  // 残差不一致，实测压不住外点。这里 2 个未知量 (Cy,Cz)，每个点一行雅可比
+  //   ∂(|t-C|-R)/∂C = -(t-C)/|t-C| = -u
+  // 正规方程 H dC = Σ w·u·r，2×2 直接解。
+  auto gn_step = [&](const std::vector<double> *wsub, double damp) -> bool {
+    double h00 = 0.0, h01 = 0.0, h11 = 0.0, g0 = 0.0, g1 = 0.0;
+    for (int i = 0; i < n; ++i) {
+      if (wsub && (*wsub)[i] <= 0.0) continue;
+      const double dy = p[i].y() - cy, dz = p[i].z() - cz;
+      const double d = std::max(1e-6, std::hypot(dy, dz));
+      const double uy = dy / d, uz = dz / d;
+      const double wi = wsub ? (*wsub)[i] : 1.0;
+      const double r = d - radius;
+      h00 += wi * uy * uy;
+      h01 += wi * uy * uz;
+      h11 += wi * uz * uz;
+      g0 += wi * uy * r;
+      g1 += wi * uz * r;
+    }
+    h00 += damp;
+    h11 += damp;
+    const double det = h00 * h11 - h01 * h01;
+    if (std::abs(det) < 1e-12) return false;
+    const double dcy = (h11 * g0 - h01 * g1) / det;
+    const double dcz = (-h01 * g0 + h00 * g1) / det;
+    const double step = std::hypot(dcy, dcz);
+    const double kMaxStep = 0.3;
+    const double sc = (step > kMaxStep) ? kMaxStep / step : 1.0;
+    cy += sc * dcy;
+    cz += sc * dcz;
+    return sc * step > 1e-7;
+  };
+
+  // 迭代：尺度 s = 1.4826·median(|r|)，Cauchy 权 w = 1/(1+(r/(3s))²)，再做一步 GN
+  std::vector<double> w(n, 1.0);
+  for (int it = 0; it < 40; ++it) {
+    std::vector<double> absr(n, 0.0);
+    for (int i = 0; i < n; ++i) absr[i] = resid(i, cy, cz);
+    std::vector<double> sorted = absr;
+    std::sort(sorted.begin(), sorted.end());
+    const double s = std::max(1e-3, 1.4826 * sorted[sorted.size() / 2]);
+    for (int i = 0; i < n; ++i) {
+      const double u = absr[i] / (3.0 * s);
+      w[i] = 1.0 / (1.0 + u * u);
+    }
+    if (!gn_step(&w, 1e-9)) break;
+  }
+
+  // ---- 鲁棒 Gauss-Newton：直接对【真实残差】|t-C| - R 做 Cauchy 加权 ----
+  // ---- 定内点集（用于报 n/rms），并在内点上做一次无权的 GN 收尾 ----
+  std::vector<double> absr(n, 0.0);
+  for (int i = 0; i < n; ++i) absr[i] = resid(i, cy, cz);
+  std::vector<double> sorted = absr;
+  std::sort(sorted.begin(), sorted.end());
+  const double s_final = std::max(1e-3, 1.4826 * sorted[sorted.size() / 2]);
+  const double inl_gate = std::max(gate_m > 0.0 ? gate_m : 0.05, 3.0 * s_final);
+  std::vector<int> idx;
+  idx.reserve(n);
+  for (int i = 0; i < n; ++i) {
+    if (absr[i] <= inl_gate) idx.push_back(i);
+  }
+  if (static_cast<int>(idx.size()) < min_n) return false;
+  std::vector<double> w_in(n, 0.0);
+  for (int i : idx) w_in[i] = 1.0;
+  for (int it = 0; it < 10; ++it) {
+    if (!gn_step(&w_in, 1e-9)) break;
+  }
+  rms = 0.0;
+  for (int i : idx) rms += resid(i, cy, cz) * resid(i, cy, cz);
+  rms = std::sqrt(rms / static_cast<double>(idx.size()));
+
+  // x（出平面）取参与拟合样本的均值 —— 同一转盘的两片应当共面，这一项应≈常数。
+  double xs = 0.0;
+  for (int i : idx) xs += p[i].x();
+  xs /= static_cast<double>(idx.size());
+  *c_out =
+      Eigen::Vector3f(static_cast<float>(xs), static_cast<float>(cy), static_cast<float>(cz));
+  if (n_out) *n_out = static_cast<int>(idx.size());
+  if (rms_out) *rms_out = rms;
+  return true;
+}
+
 bool solve_ballistic_no_drag(double d, double h, double v0, double g,
                              double *pitch_up_rad, double *fly_time_s) {
   if (!(d > 1e-3) || !(v0 > 1.0)) return false;
@@ -246,11 +415,13 @@ struct Pipeline::Impl {
   // 由两片位置联合解出的圆心（符面系）。圆心是固定点，所以它的连续性极可靠，
   // 可以用来在"中垂线两支解"里选正确的那支。
   Eigen::Vector3f center_face = Eigen::Vector3f::Zero();
-  // 大符【身份槽】：两片靶标跨帧的物理身份（0=黄/组0，1=品红/组1）。
-  // 为什么不按置信度定：detect_multi 是按分数排序返回的，两片分数接近时会每帧互换，
-  // 于是"黄/品红"跟着物理目标换（用户看到的跳变）。也不按相位定：相位只决定
-  // 【先打谁】（策略），不该决定【谁叫什么名字】（身份）。两件事分开。
   bool have_center = false;
+  // center_source=1 时用来解圆心 C 的历史：只存【被选中的那一片】的 t（车体系）。
+  // 为什么身份切换不要紧：两片点亮的靶标都落在【同一个半径 0.7 的圆】上，
+  // 所以即使帧间"谁被选中"换了，这些点仍在同一个圆上 —— 拟合对身份免疫。
+  std::deque<std::pair<double, Eigen::Vector3f>> center_hist;  // (t_rel, t_chassis)
+  int center_fit_n = 0;            // 拟合实际用到的样本数（剔除外点后）
+  double center_fit_rms_m = -1.0;  // 拟合残差 rms（米）
   // 依据：相位对圆心敏感度 1/0.7 ≈ 1.43 rad/m（圆心差 0.1m -> 相位差 8 度），
   // 而圆心是场上的固定点（激活内不动、车也不动），不该每帧重解。
 
@@ -791,32 +962,84 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       if (I.cfg.frame == RefFrame::kChassis) return q;
       return R_cg * q;
     };
-    // 6f-0) 圆心改由【两片位置】联合解出
+    // 6f-0) 转盘圆心 C
     //
-    // 原因：HW26 的 R_center = R*(0,0,-0.7) + t 依赖靶板的【面内朝向】，而 PnP 的
-    // 朝向是从 4 个点 t/l/b/r 恢复的 —— 这 4 个点构成【正方形】，绕法线转 90 度后
-    // 自己重合，所以面内朝向有 4 重退化。实测（两轮日志）两片解出的圆心分歧 rcd
-    // 稳定在 0.8~1.6 m：dlt=144 时约 1.4=2*0.7（有一片径向差了 180 度），
-    // dlt=72 时约 0.85=2*0.7*sin36（两片被拉到近乎同一朝向）。
-    // 位置 t 是无歧义的，且两片刚性固连 -> 必须共享同一个圆心。
+    // C 是"相位 -> 打击点"的唯一基准：roll = atan2(t.z-C.z, C.y-t.y)，
+    // 预测点 = (C.x, C.y - R cosθ, C.z + R sinθ)。C 错了，一切都跟着错。
     //
-    //   |t_A - C| = |t_B - C| = 0.7，且 C 在符面内（面系下只看 y-z）
-    //   -> C 在 t_A t_B 的中垂线上，距中点 h = sqrt(0.7^2 - (d/2)^2)
-    //   -> 两支解用"与上一帧圆心更近"选（圆心不动，这个判据极可靠）
-    // 期望效果：两片共用同一个 C -> 相位差恒为 72/144 的整数倍（dres->0），
-    //           且弦长 |t_A-t_B| 应等于 0.823 或 1.331（这是独立可验证的判据）。
-    // 【待验证】尚未实测。
+    // 为什么不能直接用 PnP 朝向反推：HW26 的 R_center = R*(0,0,-0.7) + t 依赖靶板的
+    // 【面内朝向】，而 PnP 的朝向由 4 个点 t/l/b/r 恢复 —— 这 4 个点构成【正方形】，
+    // 绕法线转 90° 自己重合，所以面内朝向有 4 重退化。实测两片由此解出的圆心分歧
+    // 稳定在 0.8~1.6 m（dlt=144 时约 1.4 = 2*0.7；dlt=72 时约 0.85 = 2*0.7*sin36）。
+    // 位置 t 没有这个退化，所以 C 只能靠"位置 + 半径 0.7 硬约束"来定。
+    //
+    // 两种来源（cfg.center_source）：
+    //   0 = dual：|t_A-C| = |t_B-C| = 0.7 -> C 在 t_A t_B 的中垂线上，距中点
+    //             h = sqrt(0.7² - (d/2)²)，两支用"模型输出的中心"选。
+    //             好处是第一帧就有；坏处是**另一片的位置会进到这一片的结算里**
+    //             （实测两片的面外间距 rcd 可达 0.60 m）。
+    //   1 = single_history：只用被选中那一片的【历史 t】做固定半径圆拟合（见文件
+    //             顶部的 fit_fixed_radius_center）。切断互相污染，还能剔掉该片
+    //             自己 IPPE 翻转的野值；样本不够时自动回退到 0。
     Pose3f use_a = use;
     Pose3f use_b;
     bool have_b = false;
     if (I.cfg.dual_target && poses.size() >= 2) {
       use_b = to_obs(poses[1]);
       have_b = true;
-      if (I.cfg.frame == RefFrame::kFace) {
-        const Eigen::Vector3f t0 = Rc2f * (R_cg * poses[0].translation);
-        const Eigen::Vector3f t1 = Rc2f * (R_cg * poses[1].translation);
-        const float r = buff_algo::consts::BUFF_RADIUS;
+    }
+    const float r = buff_algo::consts::BUFF_RADIUS;
+    const bool is_face = (I.cfg.frame == RefFrame::kFace);
+    Eigen::Vector3f t0 = Eigen::Vector3f::Zero(), t1 = Eigen::Vector3f::Zero();
+    const bool have_t1 = is_face && poses.size() >= 2;
+    if (is_face && !poses.empty()) {
+      t0 = Rc2f * (R_cg * poses[0].translation);
+      if (have_t1) {
+        t1 = Rc2f * (R_cg * poses[1].translation);
+        // 弦长：不依赖任何朝向的独立观测量。相邻槽位(72°) 应 0.823 m，
+        // 隔一槽位(144°) 应 1.331 m。两片被 IPPE 翻转拉开时它会明显偏离。
         out.chord_m = static_cast<double>((t0 - t1).norm());
+      }
+    }
+    // 合成观测：z 轴取 (t - C)/r —— 天然落在符面内（x=0），于是 HW26 的固定平面
+    // 前提【自动满足】，且 Buffalo 算出的 R_center 就等于 C（与朝向无关）。
+    auto mk_obs = [&](const Eigen::Vector3f &tt) -> Pose3f {
+      Eigen::Vector3f z = (tt - I.center_face) / r;
+      z.x() = 0.f;
+      if (z.norm() < 1e-3f) z = Eigen::Vector3f(0.f, 1.f, 0.f);
+      z.normalize();
+      const Eigen::Vector3f lx = Eigen::Vector3f::UnitX();
+      Eigen::Vector3f ly = z.cross(lx);
+      ly.normalize();
+      Eigen::Matrix3f Rf;
+      Rf.col(0) = lx;
+      Rf.col(1) = ly;
+      Rf.col(2) = z;
+      Pose3f o;
+      o.translation = tt;
+      o.rotation = Eigen::Quaternionf(Rf).normalized();
+      return o;
+    };
+
+    bool center_ok = false;
+    if (is_face && !poses.empty()) {
+      // ---- 来源 1：只用一片的历史做固定半径圆拟合 ----
+      if (I.cfg.center_source == 1) {
+        I.center_hist.emplace_back(t_rel, R_cg * poses[0].translation);
+        while (I.center_hist.size() > 400) I.center_hist.pop_front();
+        Eigen::Vector3f c;
+        if (fit_fixed_radius_center(I.center_hist, Rc2f, r, I.cfg.center_hist_min,
+                                    I.cfg.center_hist_span_m, I.cfg.center_hist_gate_m, t_rel,
+                                    I.cfg.center_hist_keep_s, &c, &I.center_fit_n,
+                                    &I.center_fit_rms_m)) {
+          I.center_face = c;
+          I.have_center = true;
+          center_ok = true;
+          out.center_src = 1;
+        }
+      }
+      // ---- 来源 0（也是来源 1 的兜底）：两片位置联立 ----
+      if (!center_ok && have_t1) {
         const Eigen::Vector2f a(t0.y(), t0.z()), b(t1.y(), t1.z());
         const Eigen::Vector2f d2 = b - a;
         const float dlen = d2.norm();
@@ -828,11 +1051,9 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
           const Eigen::Vector2f c2 = mid - hh * perp;
           // 选支：**不再用"离上一帧圆心更近"** —— 那是双稳态，错一次就锁死在错的
           // 一支，两片相位整体偏 180 度（实测 ra 从 +1.571 跳到 -1.574，差正好 pi）。
-          //
-          // I.last_rcenter / I.have_rcenter)：把两个候选都投到图像，取离它更近的。
-          // 为什么可行：两个候选在图像上相距约 57~293 像素（取决于槽距），而这里
-          // 只需要二选一，模型中心几厘米的误差完全不影响判定；而精确圆心仍由
-          // 几何解（两片 + 半径 0.7 这个硬约束）给出，不会把模型偏差带进跟踪。
+          // 改成：把两个候选都投到图像，取离模型输出的转盘中心（keypoints[8]）更近的。
+          // 两个候选在图像上相距约 57~293 像素，只需二选一，模型中心几厘米的偏差
+          // 不影响判定；而精确圆心仍由几何解（两片 + 半径 0.7 硬约束）给出。
           Eigen::Vector2f cc = c1;
           bool picked_by_model = false;
           if (I.have_rcenter) {
@@ -843,15 +1064,13 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
             };
             int x1 = -1, y1 = -1, x2 = -1, y2 = -1;
             if (proj_cand(c1, &x1, &y1) && proj_cand(c2, &x2, &y2)) {
-              const double d1 =
-                  std::hypot(static_cast<double>(x1) - I.last_rcenter.x,
-                             static_cast<double>(y1) - I.last_rcenter.y);
-              const double d2 =
-                  std::hypot(static_cast<double>(x2) - I.last_rcenter.x,
-                             static_cast<double>(y2) - I.last_rcenter.y);
-              cc = (d2 < d1) ? c2 : c1;
+              const double d1 = std::hypot(static_cast<double>(x1) - I.last_rcenter.x,
+                                           static_cast<double>(y1) - I.last_rcenter.y);
+              const double d2m = std::hypot(static_cast<double>(x2) - I.last_rcenter.x,
+                                            static_cast<double>(y2) - I.last_rcenter.y);
+              cc = (d2m < d1) ? c2 : c1;
               out.cand_px[0] = d1;
-              out.cand_px[1] = d2;   // 诊断：判别余量应该很大（否则这个方法不可靠）
+              out.cand_px[1] = d2m;  // 诊断：判别余量应该很大（否则这个方法不可靠）
               picked_by_model = true;
             }
           }
@@ -869,30 +1088,17 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
           }
           I.center_face = Eigen::Vector3f(0.5f * (t0.x() + t1.x()), cc.x(), cc.y());
           I.have_center = true;
-          // 合成观测：z 轴取 (t - C)/r —— 天然落在符面内（x≈0），
-          // 于是 HW26 的固定平面前提【自动满足】，且 Buffalo 算出的 R_center 就等于 C
-          auto mk_obs = [&](const Eigen::Vector3f &tt) -> Pose3f {
-            Eigen::Vector3f z = (tt - I.center_face) / r;
-            z.x() = 0.f;
-            if (z.norm() < 1e-3f) z = Eigen::Vector3f(0.f, 1.f, 0.f);
-            z.normalize();
-            const Eigen::Vector3f lx = Eigen::Vector3f::UnitX();
-            Eigen::Vector3f ly = z.cross(lx);
-            ly.normalize();
-            Eigen::Matrix3f Rf;
-            Rf.col(0) = lx;
-            Rf.col(1) = ly;
-            Rf.col(2) = z;
-            Pose3f o;
-            o.translation = tt;
-            o.rotation = Eigen::Quaternionf(Rf).normalized();
-            return o;
-          };
-          use_a = mk_obs(t0);
-          use_b = mk_obs(t1);
+          center_ok = true;
         }
       }
+      if (center_ok) {
+        use_a = mk_obs(t0);
+        if (have_b) use_b = mk_obs(t1);
+      }
     }
+    out.center_n = (I.cfg.center_source == 1) ? I.center_fit_n : 0;
+    out.center_rms_m = (I.cfg.center_source == 1) ? I.center_fit_rms_m : -1.0;
+    if (I.cfg.center_source != 1) out.center_src = 0;
 
     // 6f) 双靶标融合（大符）
     //   两片高亮靶标刚性固连在同一个转盘上，所以 roll_B(t) = roll_A(t) + Δ，
