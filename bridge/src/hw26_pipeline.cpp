@@ -1458,17 +1458,19 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       int ax = -1, ay = -1, bx = -1, by = -1;
       const bool okA = out.meas_a_valid && proj_ch(out.meas_a_ch, &ax, &ay);
       const bool okB = out.meas_b_valid && proj_ch(out.meas_b_ch, &bx, &by);
+      // 两个板心点用【同一个绿】，不再靠亮/暗区分身份（身份由旁边的编号 1/2 表达）。
+      const cv::Scalar kCenterDot(0, 255, 0);
       if (okA) {
-        cv::circle(out.debug, {ax, ay}, 6, cv::Scalar(0, 255, 0), cv::FILLED, cv::LINE_AA);
-        // 组号写在绿点旁：亮绿点 = 组 1（A），应与黄色关键点组上的"1"落在同一片靶标上
+        cv::circle(out.debug, {ax, ay}, 6, kCenterDot, cv::FILLED, cv::LINE_AA);
+        // 组号写在板心点旁：应与第 1 组关键点上的"1"落在同一片靶标上
         cv::putText(out.debug, "1", {ax + 8, ay + 16}, cv::FONT_HERSHEY_SIMPLEX, 0.7,
-                    cv::Scalar(0, 255, 0), 2, cv::LINE_AA);
+                    kCenterDot, 2, cv::LINE_AA);
       }
       if (okB) {
-        cv::circle(out.debug, {bx, by}, 6, cv::Scalar(0, 160, 0), cv::FILLED, cv::LINE_AA);
+        cv::circle(out.debug, {bx, by}, 6, kCenterDot, cv::FILLED, cv::LINE_AA);
         // 暗绿点 = 组 2（B），应与品红关键点组上的"2"落在同一片靶标上
         cv::putText(out.debug, "2", {bx + 8, by + 16}, cv::FONT_HERSHEY_SIMPLEX, 0.7,
-                    cv::Scalar(0, 160, 0), 2, cv::LINE_AA);
+                    kCenterDot, 2, cv::LINE_AA);
       }
     }
     char txt[256];
