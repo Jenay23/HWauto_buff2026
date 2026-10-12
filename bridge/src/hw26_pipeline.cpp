@@ -525,7 +525,8 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   };
 
   if (I.cfg.detector == DetectorKind::kSp25) {
-    std::optional<Sp25Detection> det;
+    // 允许置信度最高的【两个】（第二片要过阈值/比例/分离三条，否则只有一个）
+    std::vector<Sp25Detection> dets;
     if (I.ext_kpts.size() >= 6) {
       Sp25Detection d;
       d.confidence = 1.0f;
@@ -533,37 +534,44 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       for (int i = 0; i < 6; ++i) d.kpt[static_cast<std::size_t>(i)] = I.ext_kpts[static_cast<std::size_t>(i)];
       d.r_center = d.kpt[4] + 1.4f * (d.kpt[5] - d.kpt[4]);
       d.box = cv::Rect2f(d.kpt[0].x - 20.f, d.kpt[0].y - 20.f, 40.f, 40.f);
-      det = d;
-    } else {
-      det = I.sp25_det->detect(bgr, I.cfg.confidence_threshold);
+      dets.push_back(d);
+    } else if (I.cfg.sp25_top2 != 0) {
+      dets = I.sp25_det->detect_multi(bgr, I.cfg.confidence_threshold, I.cfg.second_score_min,
+                                      I.cfg.second_score_ratio, I.cfg.min_sep_px);
+    } else if (auto one = I.sp25_det->detect(bgr, I.cfg.confidence_threshold)) {
+      dets.push_back(*one);
     }
-    out.n_det = det.has_value() ? 1 : 0;
-    out.max_score = det.has_value() ? det->max_score : 0.f;
-    if (det) {
+    out.n_det = static_cast<int>(dets.size());
+    out.max_score = dets.empty() ? 0.f : dets.front().max_score;
+    out.n_selected = static_cast<int>(dets.size());
+    for (std::size_t ii = 0; ii < dets.size(); ++ii) {
+      const Sp25Detection &det = dets[ii];
       DetInfo di;
       di.color = I.cfg.buff_color;  // sp25 的模型是单类，颜色靠配置给定
       di.label = 0;
-      di.confidence = det->confidence;
-      di.cx = det->kpt[0].x;
-      di.cy = det->kpt[0].y;
+      di.confidence = det.confidence;
+      di.cx = det.kpt[0].x;
+      di.cy = det.kpt[0].y;
       out.dets.push_back(di);
-      out.n_selected = 1;
-      for (const auto &q : det->kpt) I.last_kpt.push_back(q);
-      out.det_kpts.push_back(I.last_kpt);  // sp25 只有一个检出，仅用于统一可视化
-      I.last_rcenter = det->r_center;
-      if (I.cfg.refine_r_center) {
-        // blade_bottom = kpt[2]（下），blade_center 用模型 bbox 中心
-        const cv::Point2f bc(det->box.x + det->box.width * 0.5f,
-                             det->box.y + det->box.height * 0.5f);
-        I.last_rcenter = refine_r_center(bgr, det->r_center, det->kpt[2], bc);
-        I.last_rcenter_rough = det->r_center;
-        I.have_rcenter_rough = true;
+      std::vector<cv::Point2f> kp;
+      for (const auto &q : det.kpt) kp.push_back(q);
+      out.det_kpts.push_back(kp);   // 与 poses 平行；两个检出时下游的双靶标逻辑自动生效
+      if (ii == 0) {
+        I.last_kpt = kp;
+        I.last_rcenter = det.r_center;
+        if (I.cfg.refine_r_center) {
+          // blade_bottom = kpt[2]（下），blade_center 用模型 bbox 中心
+          const cv::Point2f bc(det.box.x + det.box.width * 0.5f,
+                               det.box.y + det.box.height * 0.5f);
+          I.last_rcenter = refine_r_center(bgr, det.r_center, det.kpt[2], bc);
+          I.last_rcenter_rough = det.r_center;
+          I.have_rcenter_rough = true;
+        }
+        I.have_rcenter = true;
       }
-      I.have_rcenter = true;
-
       // 走两个后端共用的 PnP（物体点 0.127，见本函数开头的 solve_pose_ippe）
       if (const auto pose =
-            solve_pose_ippe(det->kpt[0], det->kpt[1], det->kpt[2], det->kpt[3])) {
+            solve_pose_ippe(det.kpt[0], det.kpt[1], det.kpt[2], det.kpt[3])) {
         poses.push_back(*pose);
       }
     }

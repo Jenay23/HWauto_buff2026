@@ -116,6 +116,12 @@ struct Config {
   int buff_mode = 1;    // 1 = 小符, 2 = 大符
   int buff_color = 0;   // 要打的符颜色: 0 = BLUE, 1 = RED
   float confidence_threshold = 0.5f;
+  // 大符双靶标（sp25 后端）：允许置信度最高的两个，但第二片必须同时过下面三条，
+  // 否则自动只给一个（回落成单片）。
+  float second_score_min = 0.30f;    // ① 第二片的绝对置信度下限
+  float second_score_ratio = 0.5f;   // ② 第二片 >= 该比例 × 最高分
+  float min_sep_px = 60.0f;          // ③ 与第一片中心至少相距这么多像素（挡同片重叠框）
+  int sp25_top2 = 1;                 // 0=只取一个（旧行为）1=允许两个
   float nms_threshold = 0.4f;
   // 是否启用 HW26 Selector 的两道过滤（关掉可用于诊断"检出但被过滤"）
   bool filter_color = true;

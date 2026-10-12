@@ -16,6 +16,7 @@
 
 #include <array>
 #include <optional>
+#include <vector>
 #include <string>
 
 #include <opencv2/core.hpp>
@@ -36,12 +37,28 @@ class Sp25Detector {
  public:
   explicit Sp25Detector(const std::string &model_path);
 
-  // 取置信度最高的一个框（与 sp25 的 get_onecandidatebox 一致）
+  // 取置信度最高的一个框（与 sp25 的 get_onecandidatebox 一致）—— 保留不动
   std::optional<Sp25Detection> detect(const cv::Mat &bgr, float conf_threshold);
+
+  // 取置信度最高的【最多两个】框（大符双靶标用）。
+  //   thr1        : 最高分必须 >= 它，否则一个都不给
+  //   thr2        : 第二高分必须 >= 它
+  //   ratio2      : 且第二高分 >= ratio2 * 最高分
+  //   min_sep_px  : 且两个框中心必须相距 > 它（8400 列里同一片靶板有大量重叠框，
+  //                 不加这一条会把同一片靶板当成两片；两片靶板在图上离得很远，
+  //                 所以这个判据足够）
+  // 若第二片达不到 thr2/ratio2/分离约束 -> 只返回 1 个（自动回落成单片，符合需求）
+  std::vector<Sp25Detection> detect_multi(const cv::Mat &bgr, float thr1, float thr2,
+                                          float ratio2, float min_sep_px);
 
   cv::Size input_size() const { return in_size_; }
 
  private:
+  // 预处理 + 推理，返回输出张量指针（有效期到下一次 infer / req_ 析构），inv_scale 供坐标还原
+  const float *run(const cv::Mat &bgr, float *inv_scale);
+  // 按列解码一个候选（原 get_onecandidatebox 的解码部分）
+  Sp25Detection decode_column(const float *out, float inv_scale, int col) const;
+
   ov::Core core_;
   ov::CompiledModel compiled_;
   ov::InferRequest req_;
