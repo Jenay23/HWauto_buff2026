@@ -9,7 +9,10 @@ constexpr double kPi = 3.14159265358979323846;
 constexpr double kMaxJumpDeg = 12.0;   // 单帧相位跳变上限 -> 清窗口
 constexpr double kALo = 0.780, kAHi = 1.045;
 constexpr double kWLo = 1.884, kWHi = 2.000;
-constexpr double kMean = 2.090;        // 官方: speed = a*sin(w t+phi) + (2.090-a)
+constexpr double kMean = 2.090;
+constexpr double kMaxSpeed = 2.090;     // 绝对约束: v_max = 2.090 rad/s（与 a 无关）
+constexpr double kMeanSpeedLo = 1.045;  // = 2.090 - 1.045
+constexpr double kMeanSpeedHi = 1.310;  // = 2.090 - 0.780        // 官方: speed = a*sin(w t+phi) + (2.090-a)
 constexpr int kASteps = 24;
 constexpr int kWSteps = 10;
 constexpr double kRidge = 1e-6;
@@ -304,7 +307,7 @@ void LocalRuneTracker::push(double t, double roll) {
       a_now_ = sgn_ * lock_w_ * lock_w_ *
                (p * std::cos(lock_w_ * tau) - q * std::sin(lock_w_ * tau));
     }
-  } else if (mode_ == 1) {                 // AR
+  } else if (mode_ == 1 || mode_ == 4) {   // AR / AR+包络
     fitAR();
   } else if (mode_ == 2) {                 // EKF
     ekfStep(unwrapped);
@@ -328,6 +331,11 @@ bool LocalRuneTracker::ready() const {
   if (mode_ == 1) {
     return static_cast<int>(ar_c_.size()) > 0 && static_cast<int>(h_.size()) >= min_n_ &&
            span_deg_ >= min_span_deg_ && rms_deg_ >= 0.0 && rms_deg_ <= max_rms_deg_;
+  }
+  if (mode_ == 4) {   // AR + 物理包络：不用 rms 门（AR 拟合脏数据必然 rms 大），
+                      // 安全性由 predict() 里的"速度不超过 2.090 rad/s"保证
+    return static_cast<int>(ar_c_.size()) > 0 && static_cast<int>(h_.size()) >= min_n_ &&
+           span_deg_ >= min_span_deg_;
   }
   if (mode_ == 2) {
     return ekfReady();
@@ -358,6 +366,35 @@ bool LocalRuneTracker::predict(double t_future, double *roll_out) const {
       double pr = 0.0;
       for (int i = 0; i < p; ++i) pr += ar_c_[i] * y[y.size() - i - 1];
       y.push_back(pr);
+    }
+    *roll_out = wrapPi(y.back());
+    return true;
+  }
+  if (mode_ == 4) {   // AR + 物理包络
+    const int p = static_cast<int>(ar_c_.size());
+    if (p == 0 || static_cast<int>(h_.size()) < p + 1) return false;
+    std::vector<double> y;
+    for (const auto &s : h_) y.push_back(s.roll);
+    int steps = static_cast<int>(std::lround((t_future - h_.back().t) / dt));
+    if (steps < 0 || steps > 60) return false;
+    const double max_step = kMaxSpeed * dt;      // ★ 绝对约束：单步最多走这么多
+    double sum_v = 0.0;
+    for (int k = 0; k < steps; ++k) {
+      double pr = 0.0;
+      for (int i = 0; i < p; ++i) pr += ar_c_[i] * y[y.size() - i - 1];
+      const double prev = y.back();
+      double d = pr - prev;
+      if (d > max_step) d = max_step;            // 夹住：瞬时角速度 <= 2.090 rad/s
+      if (d < -max_step) d = -max_step;
+      y.push_back(prev + d);
+      sum_v += d / dt;
+    }
+    // 平均角速度应落在 [2.090-1.045, 2.090-0.780]；越界说明 AR 在瞎走 -> 退回等速外推
+    const double mean_v = (steps > 0) ? sum_v / steps : 0.0;
+    if (steps > 0 && (mean_v < kMeanSpeedLo || mean_v > kMeanSpeedHi)) {
+      const double v = (mean_v > 0 ? kMeanSpeedHi : -kMeanSpeedHi) * (mean_v > 0 ? 1.0 : 1.0);
+      y.back() = wrapPi(h_.back().roll + (mean_v > 0 ? kMeanSpeedHi : -kMeanSpeedHi) * (steps * dt));
+      (void)v;
     }
     *roll_out = wrapPi(y.back());
     return true;
