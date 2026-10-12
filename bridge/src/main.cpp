@@ -662,7 +662,7 @@ int run_replay(const BridgeConfig &bc, const std::string &video_path, int max_fr
         longest = std::max(longest, run);
       }
     }
-    std::printf("\n[replay] === 指令增量自相关（极限环判据，对齐 sp25 的分析口径）===\n"
+    std::printf("\n[replay] === 指令增量自相关（极限环判据，对齐的分析口径）===\n"
                 "  yaw 增量 lag-1 自相关 = %+.3f  （接近 -0.5 = 每帧交替 = 极限环）\n"
                 "  符号翻转率 = %.1f%%   最长同号连续 = %d 帧\n",
                 (v0 > 1e-12) ? (v1 / v0) : 0.0, 100.0 * flips / std::max<std::size_t>(1, d.size() - 1),
