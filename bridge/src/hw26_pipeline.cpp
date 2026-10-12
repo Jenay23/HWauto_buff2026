@@ -1079,9 +1079,14 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   // 【灭灯也要继续跟踪】灭灯(det=0)时没有 PnP -> out.solved 为假，但 mode6 的滑行仍在
   // 有效外推（参数冻结、t_ref 不变 => 相位照常前进）。不放行的话绿点会在灭灯期消失，
   // 看起来就是"一个一个的绿点"而不是连续轨迹。
-  const bool coast_ok =
-      (I.cfg.local_tracker != 0) && I.local_trk.ready() && I.local_trk.coasting();
-  if ((out.solved && (trackable || local_usable)) || coast_ok) {
+  // 【局部 tracker 的预测不需要本帧的 PnP】
+  //   它只需要：窗口就绪 + 转盘中心（两者都在亮灯期锁存好了）。
+  //   原来把 out.solved 当硬条件 -> PnP 失败的那些帧（实测约占一半：solved=0 3261 帧 /
+  //   solved=1 3158 帧）整段瞄准被跳过 -> 绿点就变成"一个一个"的闪烁 ✗。
+  //   现在：局部可用即可进（滑行时 ready() 仍为真，所以也包含灭灯期）。
+  const bool local_ok =
+      (I.cfg.local_tracker != 0) && I.local_trk.ready() && I.have_center;
+  if ((out.solved && trackable) || local_ok) {
     const double alg_lag =
         (I.cfg.alg_latency > 0.0) ? I.cfg.alg_latency : I.last_latency_ms / 1000.0;
     // 相位滤波带来的滞后：滑动平均 N 帧 -> 相位代表的是 (N-1)/2 帧之前的时刻，
