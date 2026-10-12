@@ -382,6 +382,7 @@ bc.algo.num_reverse = static_cast<int>(fs.getd("num_reverse", bc.algo.num_revers
   bc.algo.dual_target = fs.getb("dual_target", true);
   bc.algo.chord_phase = fs.getb("chord_phase", false);
   bc.algo.phase_fuse_dual = fs.getb("phase_fuse_dual", true);
+  bc.algo.center_lock = fs.getb("center_lock", true);
   bc.algo.phase_ma_n = static_cast<int>(fs.getd("phase_ma_n", bc.algo.phase_ma_n));
   bc.algo.local_tracker = static_cast<int>(fs.getd("local_tracker", bc.algo.local_tracker));
   bc.algo.local_model =

@@ -419,6 +419,10 @@ struct Pipeline::Impl {
   // 可以用来在"中垂线两支解"里选正确的那支。
   Eigen::Vector3f center_face = Eigen::Vector3f::Zero();
   bool have_center = false;
+  // 圆心锁定：转盘圆心在车体系里是常量。一旦自信拟合成功就冻结，
+  // 避免"dual 兜底 <-> 历史拟合"或中垂线两支互换造成的持续相移（实测 +131°）。
+  bool center_locked = false;
+  Eigen::Vector3f center_lock = Eigen::Vector3f::Zero();
   // center_source=1 时用来解圆心 C 的历史：只存【被选中的那一片】的 t（车体系）。
   // 为什么身份切换不要紧：两片点亮的靶标都落在【同一个半径 0.7 的圆】上，
   // 所以即使帧间"谁被选中"换了，这些点仍在同一个圆上 —— 拟合对身份免疫。
@@ -1107,10 +1111,25 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
                                     I.cfg.center_hist_span_m, I.cfg.center_hist_gate_m, t_rel,
                                     I.cfg.center_hist_keep_s, &c, &I.center_fit_n,
                                     &I.center_fit_rms_m)) {
-          I.center_face = c;
-          I.have_center = true;
-          center_ok = true;
-          out.center_src = 1;
+          // 自信判据：样本够多且拟合残差小（转盘圆心是常量，好拟合应 <5cm）。
+          const bool confident = I.center_fit_n >= 40 && I.center_fit_rms_m >= 0.0 &&
+                                 I.center_fit_rms_m < 0.05;
+          if (!I.cfg.center_lock) {
+            I.center_face = c;
+            I.have_center = true;
+            center_ok = true;
+            out.center_src = 1;
+          } else if (confident) {
+            if (!I.center_locked) {   // 只在第一次自信时锁定，之后不再改
+              I.center_locked = true;
+              I.center_lock = c;
+            }
+            I.center_face = I.center_lock;
+            I.have_center = true;
+            center_ok = true;
+            out.center_src = 1;
+          }
+          // 不自信且未锁定 -> 不采纳本帧拟合，落到来源 0（dual）兜底
         }
       }
       // ---- 来源 0（也是来源 1 的兜底）：两片位置联立 ----
