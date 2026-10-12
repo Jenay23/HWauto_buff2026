@@ -120,7 +120,7 @@ local_tracker: 1
 #   5 = 裸 AR（无门：>=2 个样本即可用）⚠️ 当前是坏的：push() 没把它接进 fitAR()，
 #       实际退化成"最后两点等速外推"，详见 README §9.2
 #   6 = 查表 + 灭灯滑行（要先攒 fit_s = 1.0 s 才锁定 —— 最慢，且当前节拍下用不上）
-local_model: 4          # ★ 当前：AR + 物理包络。ready() = 有 AR 系数 + 样本 >= 12 + 相位跨 >= 30°
+local_model: 0          # ★ 经典 csine：三角函数速度模型 v=a*sin(wt)+2.090-a，VarPro(Ω 网格+线性解)；需要 rms 门（现为 30）
                         #   （不查 rms —— 脏数据下 AR 的 rms 必然大）；安全性由 predict() 里
                         #   每步 |d| <= 2.090*dt 与"平均角速度越界就退回等速"两条保证
 local_rms_gate_deg: 30  # 只对需要 rms 门的档（0/1/3）有效；mode 4 不查 rms
