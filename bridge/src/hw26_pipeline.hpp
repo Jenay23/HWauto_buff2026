@@ -286,7 +286,8 @@ struct Output {
   int local_lost = 0;
   int local_hit = 0;      // 连续 >= hit_s 秒无空窗 -> 判定命中
   double local_theta = 0.0;  // 本帧实际喂进局部 tracker 的相位（rad）
-  int local_chord = 0;       // 1 = 该相位来自"弦相位"（圆心无关），0 = 来自圆心路径
+  int local_chord = 0;       // 2=两片roll融合/roll约定 1=弦相位 0=圆心路径
+  int local_phys_rej = 0;    // mode 7 被"模型锚定创新门"拒绝的帧数（累计）
   // ---- 可视化用（全部在【车体系】，方便直接喂 project_px）----
   // 关键：两片的实测板心要【分开】留着，否则看不出是哪一片坏了/被平均了
   bool meas_a_valid = false;

@@ -51,6 +51,8 @@ class LocalRuneTracker {
   double rms_deg() const { return rms_deg_; }
   double span_deg() const { return span_deg_; }
   int ekf_rej() const { return ekf_rej_; }
+  int phys_rej() const { return phys_rej_; }
+  void set_phys_gate_rad(double g) { phys_gate_rad_ = g; }
   int jump_dropped() const { return jump_dropped_; }
   bool lost() const { return lost_; }
   bool hit_confirmed() const { return hit_confirmed_; }   // 连续 >=hit_s_ 有靶标 -> 视为命中
@@ -170,6 +172,9 @@ class LocalRuneTracker {
   int phys_valid_ = 0;
   double phys_th0_ = 0.0, phys_a_ = 0.9, phys_w_ = 1.94, phys_phi_ = 0.0;
   double phys_sgn_ = 1.0;
+  int phys_rej_ = 0;        // 被"模型锚定创新门"拒绝的帧数（累计）
+  int phys_rej_run_ = 0;    // 连续被拒帧数
+  double phys_gate_rad_ = 0.50;   // 创新门：|测量 - 模型预测| 上限（≈29°）
 
   // free
   int free_locked_ = 0;

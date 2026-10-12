@@ -465,6 +465,29 @@ void LocalRuneTracker::push(double t, double roll) {
       return;                          // 本帧不进窗口
     }
   }
+  // ★★ 模型锚定创新门（mode 7）★★
+  //   物理模型一旦可信，它比任何单帧测量都可靠：真实相位连续、速率 ≤2.09 rad/s。
+  //   凡是与模型单步预测相差超过 phys_gate_rad_ 的测量，都判为异常（IPPE 双解翻转、
+  //   圆心换支、相位源切换），【一律不入窗】。这样窗口里只剩干净样本 —— 对比实验里
+  //   "只修跳变卫兵"会让窗口装满换支帧，rms 反而涨到 49~92°。
+  if (mode_ == 7 && phys_valid_ && static_cast<int>(h_.size()) >= 20 &&
+      last_data_t_ > 0.0) {
+    const double dtp = t - last_data_t_;
+    if (dtp > 0.0 && dtp < 0.5) {
+      const double resid = wrapPi(roll - physEval(t));
+      if (std::abs(resid) > phys_gate_rad_) {
+        ++phys_rej_;
+        ++phys_rej_run_;
+        if (have_last_) {   // 推进参考，避免"一次拒绝 -> 后续全被误判"的级联
+          last_unwrapped_ = last_unwrapped_ + wrapPi(roll - last_raw_);
+          last_raw_ = roll;
+        }
+        if (phys_rej_run_ > 15) reset();   // 连续 ~0.5 s 不符 -> 认定模型锁错，重新自举
+        return;                             // 本帧不进窗口
+      }
+      phys_rej_run_ = 0;
+    }
+  }
   drop_run_ = 0;
   double unwrapped = roll;
   if (have_last_) unwrapped = last_unwrapped_ + wrapPi(roll - last_raw_);
