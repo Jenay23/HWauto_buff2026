@@ -141,7 +141,7 @@ max_distance: 15.0
 # ---- 火控 ----
 fire_enabled: 1
 fire_err_rad: 3.20           # 3.20 rad ≈ 183° -> 等于【不做对准检查】：绿点一出现就允许开火
-fire_stable_frames: 2        # 绿点连出 2 帧即允许（align_run 只在 aim 有效时累加、失效清零）
+fire_stable_frames: 1        # ★ 一帧即开火：绿点第一次出现的那一帧就打（不再等 2 帧）
 fire_cooldown: 0.0667        # 15 发/s（= 1/15 s）。注意实际射速还受
                              # fire_stable_frames 限制：每发后 align_run 会清零，
                              # 要重新连续对齐 3 帧(约 100ms @30fps) -> 上限约 10 发/s。
