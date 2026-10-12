@@ -638,6 +638,14 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
     one.reserve(d.keypoints.size());
     for (const auto &q : d.keypoints) one.emplace_back(q.x(), q.y());
     out.det_kpts.push_back(std::move(one));
+    // 青环（旋转中心 R）：HW26 的 keypoints[8] 就是模型【直接输出】的转盘中心
+    // （前 8 个是八边形顶点）。sp25 那边没有这个点，只能靠 kpt[4]/kpt[5] 外推；
+    // 换回 HW26 后恢复这里，青环与"两片夹角"等几何判断才有依据。
+    if (!detected.empty() && detected[0].keypoints.size() > 8) {
+      const auto &rc = detected[0].keypoints[8];
+      I.last_rcenter = cv::Point2f(rc.x(), rc.y());
+      I.have_rcenter = true;
+    }
   }
   if (!detected.empty()) {
     for (const auto &q : detected[0].keypoints)
