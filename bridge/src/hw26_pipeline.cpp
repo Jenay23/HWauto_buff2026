@@ -540,8 +540,7 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       d.box = cv::Rect2f(d.kpt[0].x - 20.f, d.kpt[0].y - 20.f, 40.f, 40.f);
       dets.push_back(d);
     } else if (I.cfg.sp25_top2 != 0) {
-      dets = I.sp25_det->detect_multi(bgr, I.cfg.confidence_threshold, I.cfg.second_score_min,
-                                      I.cfg.min_sep_px);
+      dets = I.sp25_det->detect_multi(bgr, I.cfg.confidence_threshold);
     } else if (auto one = I.sp25_det->detect(bgr, I.cfg.confidence_threshold)) {
       dets.push_back(*one);
     }
