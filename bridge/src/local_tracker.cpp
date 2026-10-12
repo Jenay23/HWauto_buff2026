@@ -179,6 +179,18 @@ void LocalRuneTracker::physFit() {
   const int n = static_cast<int>(h_.size());
   if (n < 6) { phys_valid_ = 0; return; }
   const double dt_span = h_.back().t - h_.front().t;
+  // ★ 物理 span 上限（防"自转"）：真实相位速率 |dθ/dt| ≤ kMaxSpeed = 2.090 rad/s，
+  //   所以一个窗口内的总 span 不可能超过 kMaxSpeed*dt_span。朴素增量解缠遇到
+  //   IPPE 翻转/换片（实测 2.4% 的帧跳 ≈180°，且方向交替）会把每帧的 ±π 累加成
+  //   "多圈自转"（实测坏段 span 1353° vs 真实 ~300°）——模型拟合了这个自转，
+  //   未来打击点就绕符心转圈。这里一旦超出硬上限，判定本窗不可信（phys_valid_=0）。
+  {
+    const double max_span = kMaxSpeed * std::max(0.05, dt_span) * 1.5 + 0.3;
+    if (std::abs(h_.back().roll - h_.front().roll) > max_span) {
+      phys_valid_ = 0;
+      return;
+    }
+  }
   if (dt_span < 1e-3) return;
   const double coarse = (h_.back().roll - h_.front().roll) / dt_span;
   const double sgn = (coarse < 0.0) ? -1.0 : 1.0;
@@ -610,9 +622,12 @@ void LocalRuneTracker::push(double t, double roll) {
 }
 
 bool LocalRuneTracker::ready() const {
-  if (mode_ == 7) {   // 物理约束模型：只要拟合成功且跨过最小跨度即可用
+  if (mode_ == 7) {   // 物理约束模型：拟合成功 + 跨度够 + 残差小
+    // ★ rms 门必须有：坏窗（解缠自转）的拟合 rms 实测可达 139~286°，若不查 rms，
+    //   这种"自转解"会被当成可用 -> 未来打击点绕符心转圈（用户看到的紫点转满圈）。
+    //   好窗 rms 只有 0.5~8°，用 15° 门可以干净分开。
     return phys_valid_ != 0 && static_cast<int>(h_.size()) >= 8 &&
-           span_deg_ >= min_span_deg_;
+           span_deg_ >= min_span_deg_ && rms_deg_ >= 0.0 && rms_deg_ <= max_rms_deg_;
   }
   if (mode_ == 0) {
     return locked_ != 0 && static_cast<int>(h_.size()) >= 4 && rms_deg_ >= 0.0 &&
