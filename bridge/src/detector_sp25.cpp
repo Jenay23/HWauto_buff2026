@@ -14,7 +14,6 @@ namespace {
 constexpr int kOutRows = 17;   // 4 bbox + 1 score + 6*2 kpt
 constexpr int kOutCols = 8400;
 constexpr int kNumPoints = 6;
-constexpr int kTopK = 64;      // 只看前 64 个候选就够找第二片了
 }  // namespace
 
 Sp25Detector::Sp25Detector(const std::string &model_path) {
@@ -100,36 +99,40 @@ std::optional<Sp25Detection> Sp25Detector::detect(const cv::Mat &bgr, float conf
 //   ① 绝对阈值 thr2      ② 相对阈值 ratio2*最高分      ③ 与第一片中心分离 min_sep_px
 // 不满足就只返回 1 个（自动回落成单片）
 std::vector<Sp25Detection> Sp25Detector::detect_multi(const cv::Mat &bgr, float thr1, float thr2,
-                                                      float ratio2, float min_sep_px) {
+                                                      float min_sep_px) {
   float inv_scale = 1.0f;
   const float *out = run(bgr, &inv_scale);
-
-  std::vector<std::pair<float, int>> cand;
-  cand.reserve(kOutCols);
-  for (int i = 0; i < kOutCols; ++i) cand.emplace_back(out[4 * kOutCols + i], i);
-  const std::size_t kk = std::min<std::size_t>(kTopK, cand.size());
-  std::partial_sort(cand.begin(), cand.begin() + kk, cand.end(),
-                    [](const std::pair<float, int> &a, const std::pair<float, int> &b) {
-                      return a.first > b.first;
-                    });
-
   std::vector<Sp25Detection> res;
-  if (cand.empty() || cand[0].first < thr1) return res;
 
-  Sp25Detection d1 = decode_column(out, inv_scale, cand[0].second);
-  d1.max_score = cand[0].first;
-  const cv::Point2f c1(d1.box.x + d1.box.width * 0.5f, d1.box.y + d1.box.height * 0.5f);
+  // 第 1 遍：全局最高分
+  int c1 = -1;
+  float s1 = 0.0f;
+  for (int i = 0; i < kOutCols; ++i) {
+    const float sc = out[4 * kOutCols + i];
+    if (sc > s1) { s1 = sc; c1 = i; }
+  }
+  if (c1 < 0 || s1 < thr1) return res;
+  Sp25Detection d1 = decode_column(out, inv_scale, c1);
+  d1.max_score = s1;
+  const cv::Point2f p1(d1.box.x + d1.box.width * 0.5f, d1.box.y + d1.box.height * 0.5f);
   res.push_back(d1);
 
-  const float need = std::max(thr2, ratio2 * cand[0].first);
-  for (std::size_t k = 1; k < kk; ++k) {
-    if (cand[k].first < need) break;  // 已排序 -> 后面只会更小
-    Sp25Detection d2 = decode_column(out, inv_scale, cand[k].second);
-    d2.max_score = cand[0].first;
-    const cv::Point2f c2(d2.box.x + d2.box.width * 0.5f, d2.box.y + d2.box.height * 0.5f);
-    if (cv::norm(c2 - c1) < min_sep_px) continue;  // 同一片靶板的重叠框 -> 跳过
+  // 第 2 遍：离第一片足够远的候选里找最高分（全量扫，绝不漏）
+  int c2 = -1;
+  float s2 = 0.0f;
+  for (int i = 0; i < kOutCols; ++i) {
+    const float sc = out[4 * kOutCols + i];
+    if (sc <= s2) continue;                 // 只对可能刷新纪录的候选解码
+    const Sp25Detection d = decode_column(out, inv_scale, i);
+    const cv::Point2f p(d.box.x + d.box.width * 0.5f, d.box.y + d.box.height * 0.5f);
+    if (cv::norm(p - p1) < min_sep_px) continue;   // 同一片靶板的重叠框 -> 不算
+    s2 = sc;
+    c2 = i;
+  }
+  if (c2 >= 0 && s2 >= thr2) {
+    Sp25Detection d2 = decode_column(out, inv_scale, c2);
+    d2.max_score = s1;
     res.push_back(d2);
-    break;
   }
   return res;
 }

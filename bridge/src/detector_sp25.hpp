@@ -48,8 +48,15 @@ class Sp25Detector {
   //                 不加这一条会把同一片靶板当成两片；两片靶板在图上离得很远，
   //                 所以这个判据足够）
   // 若第二片达不到 thr2/ratio2/分离约束 -> 只返回 1 个（自动回落成单片，符合需求）
+  // 全量两遍扫描（不排序、不看 top-K）：
+  //   第 1 遍：找全局最高分 -> 第一片
+  //   第 2 遍：在【离第一片中心 > min_sep_px】的候选里找最高分 -> 第二片
+  //           过 thr2 就返回两片，否则只返回一片
+  // 为什么这样写：原来用 partial_sort + 只看前 64 名，而同一片靶板在 8400 个候选里
+  // 会有大量重叠高分框，第二片可能排在 64 名之外 -> 被漏掉（"有时只检出一个"）。
+  // 改成全量扫描后，只要第二片存在就一定能找到。
   std::vector<Sp25Detection> detect_multi(const cv::Mat &bgr, float thr1, float thr2,
-                                          float ratio2, float min_sep_px);
+                                          float min_sep_px);
 
   cv::Size input_size() const { return in_size_; }
 

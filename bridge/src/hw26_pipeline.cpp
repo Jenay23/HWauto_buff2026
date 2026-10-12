@@ -249,9 +249,6 @@ struct Pipeline::Impl {
   // 为什么不按置信度定：detect_multi 是按分数排序返回的，两片分数接近时会每帧互换，
   // 于是"黄/品红"跟着物理目标换（用户看到的跳变）。也不按相位定：相位只决定
   // 【先打谁】（策略），不该决定【谁叫什么名字】（身份）。两件事分开。
-  cv::Point2f slot_pt[2] = {{0.f, 0.f}, {0.f, 0.f}};
-  bool slot_valid[2] = {false, false};
-  int slot_miss[2] = {0, 0};
   bool have_center = false;
   // 依据：相位对圆心敏感度 1/0.7 ≈ 1.43 rad/m（圆心差 0.1m -> 相位差 8 度），
   // 而圆心是场上的固定点（激活内不动、车也不动），不该每帧重解。
@@ -544,52 +541,9 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       dets.push_back(d);
     } else if (I.cfg.sp25_top2 != 0) {
       dets = I.sp25_det->detect_multi(bgr, I.cfg.confidence_threshold, I.cfg.second_score_min,
-                                      I.cfg.second_score_ratio, I.cfg.min_sep_px);
+                                      I.cfg.min_sep_px);
     } else if (auto one = I.sp25_det->detect(bgr, I.cfg.confidence_threshold)) {
       dets.push_back(*one);
-    }
-    // ---- 身份关联：用【关键点位置】跟上一帧的两个槽位匹配，决定谁是 0 号谁是 1 号 ----
-    // 依据：两片靶标在图像上离得很远、帧间只移动几像素，所以"最近邻"几乎不会错；
-    // 而置信度排序会因分数接近而每帧互换、相位排序会把"身份"和"策略"绑在一起。
-    if (I.cfg.identity_assoc != 0) {
-      for (int k = 0; k < 2; ++k) I.slot_miss[k] += 1;
-      auto centroid = [](const Sp25Detection &d) {
-        cv::Point2f c(0.f, 0.f);
-        for (int i = 0; i < 4; ++i) c += d.kpt[static_cast<std::size_t>(i)];  // 只用四个角点
-        return c * 0.25f;
-      };
-      auto d2 = [](const cv::Point2f &a, const cv::Point2f &b) { return cv::norm(a - b); };
-      if (dets.size() == 2) {
-        const cv::Point2f a = centroid(dets[0]), b = centroid(dets[1]);
-        bool direct_ok = I.slot_valid[0] && I.slot_valid[1];
-        if (direct_ok) {
-          const double dd = d2(a, I.slot_pt[0]) + d2(b, I.slot_pt[1]);
-          const double sw = d2(b, I.slot_pt[0]) + d2(a, I.slot_pt[1]);
-          if (sw < dd) std::swap(dets[0], dets[1]);   // 交叉更近 -> 交换
-        } else if (I.slot_valid[0] != I.slot_valid[1]) {
-          const int known = I.slot_valid[0] ? 0 : 1;
-          const cv::Point2f c0 = centroid(dets[0]);
-          // 让"离已知槽位更近"的那个去占 known 槽
-          const bool first_is_known = d2(c0, I.slot_pt[known]) <= d2(centroid(dets[1]), I.slot_pt[known]);
-          if (!first_is_known) std::swap(dets[0], dets[1]);
-        }
-      }
-      if (!dets.empty()) {
-        I.slot_pt[0] = centroid(dets[0]);
-        I.slot_valid[0] = true;
-        I.slot_miss[0] = 0;
-      }
-      if (dets.size() >= 2) {
-        I.slot_pt[1] = centroid(dets[1]);
-        I.slot_valid[1] = true;
-        I.slot_miss[1] = 0;
-      } else if (I.slot_valid[1] && I.slot_miss[1] > 15) {
-        I.slot_valid[1] = false;   // 另一片消失太久 -> 放开槽位
-      }
-      out.dbg_slot0_x = I.slot_pt[0].x;
-      out.dbg_slot0_y = I.slot_pt[0].y;
-      out.dbg_slot1_x = I.slot_pt[1].x;
-      out.dbg_slot1_y = I.slot_pt[1].y;
     }
     out.n_det = static_cast<int>(dets.size());
     out.max_score = dets.empty() ? 0.f : dets.front().max_score;
