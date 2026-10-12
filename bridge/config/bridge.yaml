@@ -25,8 +25,8 @@ device: "GPU"                  # 推理设备 CPU/GPU/AUTO/NPU（编译失败会
 #                          0.127 * 6.4/9.45 ≈ 0.086，取 0.088。
 # 实测：用 0.127 时 dis≈9.4 m，用 0.088 时 dis≈6.5 m（真值≈6.4 m）—— 已验证。
 # 注意 reproj 查不出这个尺度错误：平面靶标 PnP 有尺度不可分辨性。
-blade_half_size: 0.127
-blade_half_size_hw26: 0.088
+blade_half_size: 0.127       # 【死行】会被下面的 blade_half_size_hw26 覆盖，实际不生效（保留仅为兼容）
+blade_half_size_hw26: 0.093  # ★ 用距离真值反推：小车在(±5,1,±5)=7.07m；实测 dis≈6.7 时尺寸应放大约5%
 
 # 模拟器给的枪口补偿（POWER_RUNE_INTERFACE.md:105，实测外参）：
 #   枪口相对相机光心，云台系(X前 Y左 Z上)：前 73.83mm、右 1.08mm、下 28.48mm
@@ -149,7 +149,7 @@ gravity: 9.81
 yaw_offset_deg: 0.0
 pitch_offset_deg: -20.0     # 抵消枪管相对云台固定上仰 20deg（模拟器 POWER_RUNE_INTERFACE.md）
 predict_time: 0.10          # 额外提前量 s
-gimbal_lead_time: 0.10      # 云台自身响应滞后补偿（0.0 -> 0.10 s）：
+gimbal_lead_time: 0.0        # ★ 仿真云台极快（18 rad/s），实车那种滞后补偿在仿真里只会让瞄准偏
                             # 预测时间会加这么多，让命令提前于目标。
                             # 依据：稳定跟踪时看 [bridge] 行的 err=，滞后 ≈ err/13 度每秒。
 alg_latency: 0.0            # >0 则用它替代实测单帧耗时
@@ -190,7 +190,7 @@ face_lock_frames: 120
 #                      像素阈值 = 角度 × f，所以要随焦距缩放：
 #                      原 300 @fx=1303.686 -> 400 @fx=1739.1（×1.334）
 #   stale_ms           图像过期门（④=200）
-max_slew_deg_s: 40.0
+max_slew_deg_s: 600.0         # ★ 仿真云台 GIMBAL_CONTROL_SPEED=18 rad/s(≈1031deg/s)；原 40deg/s 是实车安全限制，仿真里只会让云台跟不上
 cmd_smooth_alpha: 0.5
 max_aim_step_px: 400.0
 stale_ms: 200.0
