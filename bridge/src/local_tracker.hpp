@@ -56,7 +56,12 @@ class LocalRuneTracker {
   void set_min_span_deg(double d) { min_span_deg_ = d; }
   void set_max_rms_deg(double d) { max_rms_deg_ = d; }
   void set_ridge(double r) { ridge_ = r; }
-  void set_mode(int m) { mode_ = m; }
+  void set_mode(int m) {
+    mode_ = m;
+    // mode6 先攒 fit_s_=1.0 s 才做网格搜索 -> 窗口必须装得下 1.0 s，
+    // 否则 span 永远到不了 1.0 s -> 永不锁定 -> ready() 永远 false。
+    if (m == 6 && win_ < 48) win_ = 48;   // ≈1.6~2.0 s @30~24fps
+  }
   int mode() const { return mode_; }
 
  private:
