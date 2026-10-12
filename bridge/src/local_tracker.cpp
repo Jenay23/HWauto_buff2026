@@ -35,6 +35,17 @@ bool solve3(const Eigen::Matrix3d &A_in, const Eigen::Vector3d &b, Eigen::Vector
 }  // namespace
 
 void LocalRuneTracker::reset() {
+  // mode 6（滑行）：灭灯时保留拟合参数，只清样本 -> 之后用解析式继续外推。
+  // 依据：模拟器里一组 (a, w) 一次激活只抽一次、之后不变（power_rune.rs），
+  // 所以亮灯期拟合的模型在灭灯期依然有效 —— 这是物理延续，不是猜测。
+  if (mode_ == 6 && locked_ != 0) {
+    if (!h_.empty()) last_data_t_ = h_.back().t;
+    h_.clear();
+    have_last_ = false;
+    coasting_ = true;
+    drop_run_ = 0;
+    return;
+  }
   h_.clear();
   have_last_ = false;
   v_now_ = a_now_ = omega_ = amp_ = 0.0;
@@ -45,7 +56,8 @@ void LocalRuneTracker::reset() {
   ar_c_.clear();
   ekf_init_ = 0;
   ekf_rej_ = ekf_tot_ = ekf_miss_ = 0;
-  etau_ = 0.0;
+  lost_ = false;
+  coasting_ = false;
 }
 
 void LocalRuneTracker::computeSpanAndDt() {
@@ -300,7 +312,7 @@ void LocalRuneTracker::push(double t, double roll) {
   computeSpanAndDt();
   if (static_cast<int>(h_.size()) < 4) return;
 
-  if (mode_ == 0) {                       // csine
+  if (mode_ == 0 || mode_ == 6) {         // csine / mode6(滑行)
     t_ref_ = 0.5 * (h_.front().t + h_.back().t);
     if (locked_ == 0) {
       refitShape();
@@ -309,6 +321,7 @@ void LocalRuneTracker::push(double t, double roll) {
       double r = 0;
       if (solveLinear(lock_a_, lock_w_, &c, &r)) {
         lin_c_ = c;
+        lost_ = false; coasting_ = false; last_data_t_ = t;
         rms_deg_ = r * 180.0 / kPi;
         if (rms_deg_ > kRelockRmsDeg) { locked_ = 0; refitShape(); }
       }
@@ -346,6 +359,9 @@ bool LocalRuneTracker::ready() const {
     return static_cast<int>(ar_c_.size()) > 0 && static_cast<int>(h_.size()) >= min_n_ &&
            span_deg_ >= min_span_deg_ && rms_deg_ >= 0.0 && rms_deg_ <= max_rms_deg_;
   }
+  if (mode_ == 6) {   // 滑行：拟合成功即可用（滑行期间也算），超时则不可用
+    return locked_ != 0 && !lost_;
+  }
   if (mode_ == 5) {   // AR 裸预测：真正无门 —— 有 2 个样本就可用
     return static_cast<int>(h_.size()) >= 2;
   }
@@ -364,7 +380,14 @@ bool LocalRuneTracker::ready() const {
 bool LocalRuneTracker::predict(double t_future, double *roll_out) const {
   if (!ready()) return false;
   const double dt = meanDt();
-  if (mode_ == 0) {
+  if (mode_ == 6) {   // 滑行：冻结参数继续外推；超过 coast_s_ 报消失
+    if (locked_ == 0) return false;
+    if (last_data_t_ > 0.0 && (t_future - last_data_t_) > coast_s_) {
+      lost_ = true;
+      return false;
+    }
+  }
+  if (mode_ == 0 || mode_ == 6) {
     const double tau = t_future - t_ref_;
     if (std::abs(tau) > 3.0) return false;
     const double p = lin_c_(1), q = lin_c_(2);
