@@ -102,7 +102,14 @@ std::vector<Sp25Detection> Sp25Detector::detect_multi(const cv::Mat &bgr, float 
   float inv_scale = 1.0f;
   const float *out = run(bgr, &inv_scale);
 
-  // 收集所有 score > thr 的候选
+  auto wrapPi = [](double a) {
+    const double kPi = 3.14159265358979323846;
+    while (a > kPi) a -= 2.0 * kPi;
+    while (a <= -kPi) a += 2.0 * kPi;
+    return a;
+  };
+
+  // 1) 只按置信度过滤
   std::vector<std::pair<float, int>> hits;
   for (int i = 0; i < kOutCols; ++i) {
     const float sc = out[4 * kOutCols + i];
@@ -110,18 +117,62 @@ std::vector<Sp25Detection> Sp25Detector::detect_multi(const cv::Mat &bgr, float 
   }
   std::vector<Sp25Detection> res;
   if (hits.empty()) return res;
-  const std::size_t kMaxOut = 4;   // 正常就是两片；同片重叠框刷屏时封顶
-  if (hits.size() > kMaxOut) {
-    std::partial_sort(hits.begin(), hits.begin() + kMaxOut, hits.end(),
+
+  // 只看分数最高的前 12 个（选两片足够；避免同片重叠框刷屏）
+  const std::size_t kLook = 12;
+  if (hits.size() > kLook) {
+    std::partial_sort(hits.begin(), hits.begin() + kLook, hits.end(),
                       [](const std::pair<float, int> &a, const std::pair<float, int> &b) {
                         return a.first > b.first;
                       });
-    hits.resize(kMaxOut);
+    hits.resize(kLook);
   }
+  std::vector<Sp25Detection> cand;
+  cand.reserve(hits.size());
   for (const auto &h : hits) {
     Sp25Detection d = decode_column(out, inv_scale, h.second);
     d.max_score = h.first;
-    res.push_back(d);
+    cand.push_back(d);
+  }
+  if (cand.size() == 1) {
+    res.push_back(cand[0]);
+    return res;
+  }
+
+  // 2) 选一对：两片相对【旋转中心】的夹角必须是 72 度的整数倍，且不能重合
+  //    （转盘 5 个槽位 -> 任意两片的夹角只能是 72/144/216/288 度）
+  //    在这些合法对里取"置信度和最高"的一对；找不到就只给最高分那一个。
+  const double kSlotDeg = 72.0;   // 槽位间距
+  const double kTolDeg = 12.0;    // 允许的偏差
+  const double kMinSepDeg = 20.0; // 小于它视为重合（同一片）
+  auto angDeg = [&](const Sp25Detection &d) {
+    const cv::Point2f v = d.kpt[4] - d.r_center;
+    return std::atan2(v.y, v.x) * 180.0 / 3.14159265358979323846;
+  };
+  int bi = -1, bj = -1;
+  float best_sum = -1.0f;
+  for (std::size_t i = 0; i < cand.size(); ++i) {
+    for (std::size_t j = i + 1; j < cand.size(); ++j) {
+      const double dd = std::fabs(wrapPi((angDeg(cand[i]) - angDeg(cand[j])) *
+                                         3.14159265358979323846 / 180.0)) *
+                        180.0 / 3.14159265358979323846;
+      if (dd < kMinSepDeg) continue;                       // 重合 -> 同一片，排除
+      const double r = std::fmod(dd, kSlotDeg);
+      const double resid = std::min(r, kSlotDeg - r);      // 偏离 72 的倍数多少度
+      if (resid > kTolDeg) continue;                       // 不是槽位夹角 -> 排除
+      const float sum = cand[i].confidence + cand[j].confidence;
+      if (sum > best_sum) {
+        best_sum = sum;
+        bi = static_cast<int>(i);
+        bj = static_cast<int>(j);
+      }
+    }
+  }
+  if (bi >= 0) {
+    res.push_back(cand[bi]);
+    res.push_back(cand[bj]);
+  } else {
+    res.push_back(cand[0]);   // 找不到合法的一对 -> 只给最高分那个（自动回落成一片）
   }
   return res;
 }
