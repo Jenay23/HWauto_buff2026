@@ -19,6 +19,11 @@
 //                它和批拟合撞同一堵墙。留在这里是为了对比，不建议作为主方案。
 //   3 = free   ：自由线性正弦 phase = c0 + c1*t + c2*sin(wt) + c3*cos(wt)（w 网格）
 //                c1 自由 -> 能适配任意转向，但会吸收噪声斜率 -> 会漂
+//   7 = phys   ：★唯一推荐。直接把模拟器物理模型
+//                phase = th0 + sgn*[(2.090-a)t + (a/w)(cos phi - cos(wt+phi))]
+//                用【稳健 Levenberg-Marquardt】整体拟合 (th0,a,w,phi)，a/w 硬夹在
+//                官方区间；不需要网格、不需要多档门限、对跳变用 Huber 权重自动降权。
+//                离线实测在同样窗口/同样 horizon 下中位误差全面小于 0/1/3 档。
 //
 // 共同点：只负责【相位】；转盘中心由调用方提供。
 // 为什么不用 HW26 的 tracker：见 README/提交历史（RANSAC 3 点最小样本 + 内点门，
@@ -58,6 +63,13 @@ class LocalRuneTracker {
       lost_reported_ = true;
       return;
     }
+    // mode 7：短暂掉检（<0.35 s）不清历史，让稳健拟合继续用已有窗口；
+    // 真正灭灯才清。这是"快速拿到 1 s 窗口"的关键——单帧丢失不再让拟合从零开始。
+    if (mode_ == 7 && !h_.empty() && last_data_t_ > 0.0 && (t - last_data_t_) < 0.35) {
+      last_dark_t_ = t;
+      hit_confirmed_ = false;
+      return;
+    }
     last_dark_t_ = t;
     hit_confirmed_ = false;
     reset();                   // mode6 且未超时 -> reset 内部会走滑行分支（保留参数）
@@ -79,6 +91,7 @@ class LocalRuneTracker {
     // mode6 先攒 fit_s_=1.0 s 才做网格搜索 -> 窗口必须装得下 1.0 s，
     // 否则 span 永远到不了 1.0 s -> 永不锁定 -> ready() 永远 false。
     if (m == 6 && win_ < 48) win_ = 48;   // ≈1.6~2.0 s @30~24fps
+    if (m == 7 && win_ < 80) win_ = 80;   // ≈2.0~3.2 s：装下整个点亮窗口，供物理拟合
   }
   int mode() const { return mode_; }
 
@@ -98,6 +111,10 @@ class LocalRuneTracker {
 
   // --- mode 3: free linear sine ---
   bool fitFree(Eigen::Vector4d *coef, double *w_out, double *t_ref_out);
+
+  // --- mode 7: physical constrained model, robust LM ---
+  void physFit();
+  double physEval(double t) const;
 
   // --- mode 1: AR ---
   void fitAR();  // 更新 ar_c_
@@ -148,6 +165,11 @@ class LocalRuneTracker {
   Eigen::Vector3d lin_c_ = Eigen::Vector3d::Zero();
   double t_ref_ = 0.0;
   double sgn_ = 1.0;
+
+  // phys (mode 7)
+  int phys_valid_ = 0;
+  double phys_th0_ = 0.0, phys_a_ = 0.9, phys_w_ = 1.94, phys_phi_ = 0.0;
+  double phys_sgn_ = 1.0;
 
   // free
   int free_locked_ = 0;

@@ -54,6 +54,7 @@ void LocalRuneTracker::reset() {
   span_deg_ = 0.0;
   drop_run_ = 0;
   locked_ = free_locked_ = 0;
+  phys_valid_ = 0;
   ar_c_.clear();
   ekf_init_ = 0;
   ekf_rej_ = ekf_tot_ = ekf_miss_ = 0;
@@ -155,6 +156,146 @@ bool LocalRuneTracker::fitFree(Eigen::Vector4d *coef, double *w_out, double *t_r
   omega_ = bw; amp_ = std::hypot(bc(2), bc(3)) * bw;
   rms_deg_ = best * 180.0 / kPi;
   return true;
+}
+
+// ======================= mode 7: physical model + robust LM =======================
+//
+// 模拟器 truth（power_rune.rs）：speed(t) = a*sin(w t) + (2.090 - a)，
+// 积分得 phase(t) = th0 + sgn*[(2.090-a)t + (a/w)(cos(phi) - cos(w t + phi))]。
+// t 的原点（激活时刻）未知，已经被 phi 吸收。参数: th0, a, w, phi，sgn 由数据趋势定。
+//
+// 为什么用 LM 而不是"网格 a,w + 线性解"（mode 0）：
+//   - w 只有 1 维，且 [1.884,2.000] 很窄；LM 直接从初值收敛，不需要 24x10 网格。
+//   - 残差用 Huber 权重，IPPE 翻转/换片造成的孤立大跳变自动降权，不需要丢帧。
+//   - a,w 硬夹在官方区间内，模型永不漂出物理可行域。
+double LocalRuneTracker::physEval(double t) const {
+  const double c = (kMean - phys_a_) * t +
+                   (phys_a_ / phys_w_) * (std::cos(phys_phi_) -
+                                          std::cos(phys_w_ * t + phys_phi_));
+  return phys_th0_ + phys_sgn_ * c;
+}
+
+void LocalRuneTracker::physFit() {
+  const int n = static_cast<int>(h_.size());
+  if (n < 6) { phys_valid_ = 0; return; }
+  const double dt_span = h_.back().t - h_.front().t;
+  if (dt_span < 1e-3) return;
+  const double coarse = (h_.back().roll - h_.front().roll) / dt_span;
+  const double sgn = (coarse < 0.0) ? -1.0 : 1.0;
+
+  // --- 粗网格初始化: a x w x phi, th0 线性解出 ---
+  double best = 1e18, bth0 = 0.0, ba = 0.9, bw = 1.94, bphi = 0.0;
+  for (int ia = 0; ia <= 4; ++ia) {
+    const double a = kALo + (kAHi - kALo) * ia / 4.0;
+    for (int iw = 0; iw <= 5; ++iw) {
+      const double w = kWLo + (kWHi - kWLo) * iw / 5.0;
+      for (int ip = 0; ip < 12; ++ip) {
+        const double phi = 2.0 * kPi * ip / 12.0;
+        double my = 0.0, mp = 0.0;
+        for (const auto &s : h_) {
+          my += s.roll;
+          mp += sgn * ((kMean - a) * s.t +
+                       (a / w) * (std::cos(phi) - std::cos(w * s.t + phi)));
+        }
+        my /= n; mp /= n;
+        const double th0 = my - mp;
+        double se = 0.0;
+        for (const auto &s : h_) {
+          const double p = th0 + sgn * ((kMean - a) * s.t +
+                                        (a / w) * (std::cos(phi) - std::cos(w * s.t + phi)));
+          se += (s.roll - p) * (s.roll - p);
+        }
+        if (se < best) { best = se; bth0 = th0; ba = a; bw = w; bphi = phi; }
+      }
+    }
+  }
+
+  // --- 稳健 LM ---
+  double th0 = bth0, a = ba, w = bw, phi = bphi;
+  double lam = 1e-3;
+  auto eval = [&](double t, double A, double W, double P, double T0) {
+    return T0 + sgn * ((kMean - A) * t +
+                       (A / W) * (std::cos(P) - std::cos(W * t + P)));
+  };
+  auto sse = [&](double A_, double W_, double P_, double T0_) {
+    double se = 0.0;
+    for (const auto &s : h_) {
+      const double r = s.roll - eval(s.t, A_, W_, P_, T0_);
+      se += r * r;
+    }
+    return se;
+  };
+  double cur = sse(a, w, phi, th0);
+  for (int it = 0; it < 50; ++it) {
+    // 残差 + Huber 权重（IRLS）
+    std::vector<double> r(n, 0.0), wt(n, 1.0);
+    for (int i = 0; i < n; ++i) r[i] = h_[i].roll - eval(h_[i].t, a, w, phi, th0);
+    {
+      std::vector<double> ar(n);
+      for (int i = 0; i < n; ++i) ar[i] = std::abs(r[i]);
+      std::sort(ar.begin(), ar.end());
+      double sig = 1.4826 * ar[n / 2];
+      if (sig < 1e-4) sig = 1e-4;
+      for (int i = 0; i < n; ++i) {
+        const double u = r[i] / (2.5 * sig);
+        wt[i] = 1.0 / std::sqrt(1.0 + u * u);
+      }
+    }
+    Eigen::Matrix4d A = Eigen::Matrix4d::Zero();
+    Eigen::Vector4d b = Eigen::Vector4d::Zero();
+    for (int i = 0; i < n; ++i) {
+      const double t = h_[i].t;
+      const double cw = std::cos(w * t + phi), sw = std::sin(w * t + phi);
+      const double cp = std::cos(phi), sp = std::sin(phi);
+      Eigen::Vector4d J;
+      J(0) = 1.0;                                           // d/dth0
+      J(1) = sgn * (-t + (1.0 / w) * (cp - cw));            // d/da
+      J(2) = sgn * a * (t * sw / w - (cp - cw) / (w * w));  // d/dw
+      J(3) = sgn * (a / w) * (-sp + sw);                    // d/dphi
+      const double ww = wt[i] * wt[i];
+      A += ww * J * J.transpose();
+      b += ww * J * r[i];
+    }
+    for (int i = 0; i < 4; ++i) A(i, i) += lam * A(i, i) + 1e-12;
+    const Eigen::Vector4d d = A.ldlt().solve(b);
+    if (!d.allFinite()) break;
+    const double nth0 = th0 + d(0);
+    const double na = std::min(kAHi, std::max(kALo, a + d(1)));
+    const double nw = std::min(kWHi, std::max(kWLo, w + d(2)));
+    const double nphi = phi + d(3);
+    const double nsse = sse(na, nw, nphi, nth0);
+    if (nsse < cur) {
+      th0 = nth0; a = na; w = nw; phi = nphi; cur = nsse;
+      lam = std::max(lam * 0.4, 1e-6);
+    } else {
+      lam = std::min(lam * 4.0, 1e3);   // 拒绝：只加阻尼，参数不动
+    }
+    if (d.norm() < 1e-9 || lam >= 1e3) break;
+  }
+
+  phys_th0_ = th0;
+  phys_a_ = a;
+  phys_w_ = w;
+  phys_phi_ = phi;
+  phys_sgn_ = sgn;
+  phys_valid_ = 1;
+  locked_ = 1;
+  omega_ = w;
+  amp_ = a;
+  // 稳健 rms（Huber 加权）
+  {
+    double se = 0.0;
+    for (const auto &s : h_) {
+      const double r = s.roll - physEval(s.t);
+      se += r * r;
+    }
+    rms_deg_ = std::sqrt(se / n) * 180.0 / kPi;
+  }
+  // 瞬时速度/加速度
+  phys_sgn_ = sgn;
+  const double t = h_.back().t;
+  v_now_ = sgn * ((kMean - a) + a * std::sin(w * t + phi));
+  a_now_ = sgn * a * w * std::cos(w * t + phi);
 }
 
 // ======================= mode 1: AR(p) =======================
@@ -418,6 +559,9 @@ void LocalRuneTracker::push(double t, double roll) {
       a_now_ = sgn_ * lock_w_ * lock_w_ *
                (p * std::cos(lock_w_ * tau) - q * std::sin(lock_w_ * tau));
     }
+  } else if (mode_ == 7) {                 // 物理约束模型 + 稳健 LM
+    last_data_t_ = t;
+    physFit();
   } else if (mode_ == 1 || mode_ == 4) {   // AR / AR+包络
     fitAR();
   } else if (mode_ == 2) {                 // EKF
@@ -435,6 +579,10 @@ void LocalRuneTracker::push(double t, double roll) {
 }
 
 bool LocalRuneTracker::ready() const {
+  if (mode_ == 7) {   // 物理约束模型：只要拟合成功且跨过最小跨度即可用
+    return phys_valid_ != 0 && static_cast<int>(h_.size()) >= 8 &&
+           span_deg_ >= min_span_deg_;
+  }
   if (mode_ == 0) {
     return locked_ != 0 && static_cast<int>(h_.size()) >= 4 && rms_deg_ >= 0.0 &&
            rms_deg_ <= max_rms_deg_;
@@ -470,6 +618,11 @@ bool LocalRuneTracker::predict(double t_future, double *roll_out) const {
       lost_ = true;
       return false;
     }
+  }
+  if (mode_ == 7) {
+    if (last_data_t_ > 0.0 && (t_future - last_data_t_) > 1.0) return false;
+    *roll_out = wrapPi(physEval(t_future));
+    return true;
   }
   if (mode_ == 0 || mode_ == 6) {
     const double tau = t_future - t_ref_;

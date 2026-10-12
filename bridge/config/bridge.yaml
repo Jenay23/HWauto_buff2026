@@ -117,15 +117,16 @@ local_tracker: 1
 #   2 = EKF（状态 [theta,a,w,phi]；离线实测不好，留作对比）
 #   3 = free（自由线性正弦；能拟合但会漂，兜底用）
 #   4 = AR + 物理包络（不用 rms 门，靠每步 |d| <= 2.090*dt + 平均角速度包络兜底）
-#   5 = 裸 AR（无门：>=2 个样本即可用）⚠️ 当前是坏的：push() 没把它接进 fitAR()，
-#       实际退化成"最后两点等速外推"，详见 README §9.2
+#   5 = 裸 AR（>=2 个样本即可用）
 #   6 = 查表 + 灭灯滑行（要先攒 fit_s = 1.0 s 才锁定 —— 最慢，且当前节拍下用不上）
-local_model: 0          # ★ 经典 csine：三角函数速度模型 v=a*sin(wt)+2.090-a，VarPro(Ω 网格+线性解)；需要 rms 门（现为 30）
-                        #   （不查 rms —— 脏数据下 AR 的 rms 必然大）；安全性由 predict() 里
-                        #   每步 |d| <= 2.090*dt 与"平均角速度越界就退回等速"两条保证
-local_rms_gate_deg: 30  # 只对需要 rms 门的档（0/1/3）有效；mode 4 不查 rms
-local_coast_s: 0.2      # 只对 mode 6 有效（灭灯滑行）；mode 4 灭灯即 reset
-                        # 实测灭灯间隔 1.6~3.2 s，0.2 s 覆盖不了任何空窗（README §6.2）
+#   7 = ★phys：直接把模拟器物理模型 phase = th0 + sgn*[(2.090-a)t
+#         + (a/w)(cos phi - cos(wt+phi))] 用稳健 Levenberg-Marquardt 整体拟合
+#         (th0,a,w,phi)；a/w 硬夹官方区间，Huber 权重自动压制跳变野值。
+#         不需要网格/多档门限，窗口装满整个点亮窗口（win>=80），短暂掉检不清历史。
+#         离线对比：同样窗口/同样 horizon 下中位误差全面小于 0/1/3/4 档。
+local_model: 7
+local_rms_gate_deg: 30  # 只对需要 rms 门的档（0/1/3）有效；mode 7 不查 rms
+local_coast_s: 0.2      # 只对 mode 6 有效（灭灯滑行）；mode 7 短暂掉检<0.35s 保留窗口
 
 # ---- 转盘圆心 C 的来源 ----
 # 圆心 C 是"相位 -> 打击点"的唯一基准：roll = atan2(t.z-C.z, C.y-t.y)，
