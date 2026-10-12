@@ -84,38 +84,6 @@ inline bool project_cam(const Eigen::Vector3f &p_cam, const cv::Mat &K, int *px,
   return true;
 }
 
-//   粗估点 + 二值化(灰>100) + 5x5 膨胀 + 圆形 mask + minAreaRect 选最方正且离粗估最近的轮廓
-cv::Point2f refine_r_center(const cv::Mat &bgr, const cv::Point2f &rough,
-                            const cv::Point2f &blade_bottom, const cv::Point2f &blade_center) {
-  cv::Mat gray, binary, dilated;
-  cv::cvtColor(bgr, gray, cv::COLOR_BGR2GRAY);
-  cv::threshold(gray, binary, 100, 255, cv::THRESH_BINARY);
-  cv::dilate(binary, dilated, cv::getStructuringElement(cv::MORPH_RECT, {5, 5}), cv::Point(-1, -1),
-             1);
-  const double radius = std::max(4.0, cv::norm(blade_bottom - blade_center) * 0.8);
-  cv::Mat mask = cv::Mat::zeros(dilated.size(), CV_8U);
-  cv::circle(mask, rough, static_cast<int>(radius), cv::Scalar(255), cv::FILLED);
-  cv::bitwise_and(dilated, mask, dilated);
-
-  std::vector<std::vector<cv::Point>> contours;
-  cv::findContours(dilated, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_NONE);
-  cv::Point2f best = rough;
-  double best_ratio = 1e18;
-  for (const auto &c : contours) {
-    const cv::RotatedRect rr = cv::minAreaRect(c);
-    if (rr.size.width < 1.f || rr.size.height < 1.f) continue;
-    const double mx = std::max(rr.size.width, rr.size.height);
-    const double mn = std::min(rr.size.width, rr.size.height);
-    const double ratio =
-        mx / mn + cv::norm(rr.center - rough) / std::max(1.0, radius / 3.0);
-    if (ratio < best_ratio) {
-      best_ratio = ratio;
-      best = rr.center;
-    }
-  }
-  return best;
-}
-
 constexpr int64_t kCandidateCount = 5040;
 constexpr int64_t kOutputColumns = 26;  // 4 + 4 + 9*2
 // 用它把"配置里只写一个 model: 路径"变成可能：后端由输出形状判定。
@@ -340,8 +308,6 @@ Pipeline::Pipeline(const Config &cfg) : impl_(new Impl(cfg)) {
     throw std::runtime_error(os.str());
   }
 
-  // The HW26 model compile MUST stay outside the else above,
-  // otherwise HW26 also takes the FATAL branch and the bridge exits at startup.
   I.compiled = compile_with_fallback(I.core, model, cfg.device);
   { std::cout << "[hw26] OpenVINO device=" << cfg.device << "  available:";
     for (const auto &d : I.core.get_available_devices()) std::cout << " " << d;
@@ -349,13 +315,6 @@ Pipeline::Pipeline(const Config &cfg) : impl_(new Impl(cfg)) {
   I.req = I.compiled.create_infer_request();
   std::cout << "[hw26] detector=hw26(" << cfg.model_path
             << ")  (9 keypoints, colour + activation classified)" << std::endl;
-
-  {
-    I.compiled = compile_with_fallback(I.core, model, cfg.device);
-    I.req = I.compiled.create_infer_request();
-    std::cout << "[hw26] detector=hw26(" << cfg.model_path
-              << ")  (9 keypoints, colour + activation classified)" << std::endl;
-  }
 
   I.selector = std::make_unique<buff_algo::BuffSelector>(cfg.buff_color);
   I.selector->set_camera_matrix(cfg.camera_matrix, cfg.distort_coeffs);
@@ -554,16 +513,14 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   };
 
   {
-  // 合成自检（--selftest-aim）注入的关键点：两个后端都必须支持。
+  // 合成自检（--selftest-aim）注入的关键点。
   if (I.ext_kpts.size() >= 6) {
     const cv::Point2f &pt = I.ext_kpts[0];
     const cv::Point2f &pl = I.ext_kpts[1];
     const cv::Point2f &pb = I.ext_kpts[2];
     const cv::Point2f &pr = I.ext_kpts[3];
     for (const auto &q : I.ext_kpts) I.last_kpt.push_back(q);
-    if (I.cfg.detect_only == 0) {
-      if (const auto pose = solve_pose_ippe(pt, pl, pb, pr)) poses.push_back(*pose);
-    }
+    if (const auto pose = solve_pose_ippe(pt, pl, pb, pr)) poses.push_back(*pose);
     DetInfo di;
     di.color = I.cfg.buff_color;
     di.label = 0;
@@ -1035,7 +992,6 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       out.local_n = I.local_trk.n();
       out.local_ready = I.local_trk.ready() ? 1 : 0;
       out.local_w = I.local_trk.velocity();
-      out.local_a = I.local_trk.accel();
       out.local_rms_deg = I.local_trk.rms_deg();
       out.local_locked = I.local_trk.locked() ? 1 : 0;
       out.local_omega = I.local_trk.omega();
@@ -1113,26 +1069,6 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   const BuffState state = I.tracker->get_state();
   out.roll = state.roll;
   out.roll_velocity = state.roll_velocity;
-
-  // 7b) tracker 自己认为的叶片位置（诊断量，供离线核对"它锁的是不是真靶标"）。
-  //     直接用 HW26 自己的公式与半径 consts::BUFF_RADIUS，保证和它内部一致。
-  {
-    const float R = buff_algo::consts::BUFF_RADIUS;
-    const Eigen::Vector3f p_obs(state.r_center.x(),
-                                state.r_center.y() - R * std::cos(state.roll),
-                                state.r_center.z() + R * std::sin(state.roll));
-    // 观测系 -> 车体系（tracker 的状态是在 feed 它时所用的参考系里）
-    auto obs2ch = [&](const Eigen::Vector3f &q) -> Eigen::Vector3f {
-      if (I.cfg.frame == RefFrame::kFace) return I.R_chassis_face * q;
-      if (I.cfg.frame == RefFrame::kChassis) return q;
-      return R_cg * q;
-    };
-    out.trk_rc_ch = obs2ch(Eigen::Vector3f(state.r_center));
-    out.trk_u_ch = obs2ch(Eigen::Vector3f(0.f, -1.f, 0.f));  // 轨道面内基（与公式一致）
-    out.trk_v_ch = obs2ch(Eigen::Vector3f(0.f, 0.f, 1.f));
-    out.trk_blade_ch = obs2ch(p_obs);
-    out.trk_valid = true;
-  }
 
   // 8) 预测 + 弹道 + 云台角
   const bool trackable = (out.status == static_cast<int>(StatusType::TRACKING));
@@ -1244,7 +1180,6 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
         const double step = std::hypot(static_cast<double>(out.aim_px_x) - I.prev_aim_px.x,
                                        static_cast<double>(out.aim_px_y) - I.prev_aim_px.y);
         aim_jumped = step > I.cfg.max_aim_step_px;
-        out.aim_jumped = aim_jumped;
       }
       if (!aim_jumped) {
         // (2) 角速度限幅：clamp(raw - 当前姿态, ±slew*dt)（与帧率无关）
@@ -1333,10 +1268,7 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       if (std::abs(denom) > 1e-4f) {
         const float tt = I.n_face.dot(I.c_face_chassis - muzzle_ch) / denom;
         if (tt > 0.f && tt < 60.f) {
-          out.blue_range = tt;
-          if (project_px(muzzle_ch + tt * dir_ch, &out.blue_px_x, &out.blue_px_y)) {
-            out.blue_valid = true;
-          }
+          project_px(muzzle_ch + tt * dir_ch, &out.blue_px_x, &out.blue_px_y);
         }
       }
     }
@@ -1357,7 +1289,7 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
                  cv::FILLED, cv::LINE_AA);
     }
     // ---- 蓝点（枪管射线 ∩ 符平面）已按用户要求【取消绘制】----
-    // 数据仍然计算（out.blue_px_* / blue_valid 保留，供日志与调试用），只是不画。
+    // 数据仍然计算（out.blue_px_* 保留，供日志与调试用），只是不画。
 
     // ---- 把检测到的东西画出来（让"在检测什么"可见）----
     // 多个检出各自一组颜色：第 1 组黄（与原行为一致），第 2 组品红，第 3 组起循环。
@@ -1397,7 +1329,7 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
     // ---- 两片各自实测的板心（亮绿/暗绿）----
     //   判据：两点应落在同一个转盘的轨道上，角间距 72° 或 144°；
     //   它们各自对应一片点亮的靶标（关键点组 1 / 组 2 也应该各落在一片上面）。
-    if (out.trk_valid && I.face_ready) {
+    if (I.face_ready) {
       // 两片各自实测的板心
       int ax = -1, ay = -1, bx = -1, by = -1;
       const bool okA = out.meas_a_valid && proj_ch(out.meas_a_ch, &ax, &ay);
@@ -1427,7 +1359,6 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   g_stage_acc.mark(4);
   const auto t_end = std::chrono::steady_clock::now();
   out.lead_s = lead;
-  out.fly_s = fly;
   out.latency_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
   I.last_latency_ms = out.latency_ms;
   g_stage_acc.report(out.latency_ms);

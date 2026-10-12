@@ -294,7 +294,6 @@ BridgeConfig load_config(const std::string &path) {
   bc.algo.buff_mode = fs.geti("mode", 1);
   bc.algo.buff_color = fs.geti("my_color", 0);
   bc.algo.confidence_threshold = static_cast<float>(fs.getd("confidence_threshold", 0.5));
-bc.algo.detect_only = static_cast<int>(fs.getd("detect_only", bc.algo.detect_only));
 bc.algo.num_reverse = static_cast<int>(fs.getd("num_reverse", bc.algo.num_reverse));
   bc.algo.nms_threshold = static_cast<float>(fs.getd("nms_threshold", 0.4));
   bc.algo.filter_color = fs.getb("filter_color", true);
@@ -333,13 +332,10 @@ bc.algo.num_reverse = static_cast<int>(fs.getd("num_reverse", bc.algo.num_revers
   bc.algo.face_ema = fs.getd("face_ema", bc.algo.face_ema);
   bc.algo.face_ema_locked = fs.getd("face_ema_locked", bc.algo.face_ema_locked);
   bc.algo.face_lock_frames = fs.geti("face_lock_frames", bc.algo.face_lock_frames);
-  bc.algo.max_cmd_step_deg = fs.getd("max_cmd_step_deg", bc.algo.max_cmd_step_deg);
   bc.algo.max_slew_deg_s = fs.getd("max_slew_deg_s", bc.algo.max_slew_deg_s);
   bc.algo.cmd_smooth_alpha = fs.getd("cmd_smooth_alpha", bc.algo.cmd_smooth_alpha);
   bc.algo.max_aim_step_px = fs.getd("max_aim_step_px", bc.algo.max_aim_step_px);
   bc.algo.stale_ms = fs.getd("stale_ms", bc.algo.stale_ms);
-  // 与 ④ 的 stale 门统一：取两者较小者，避免出现两个不一致的过期判据
-  bc.algo.refine_r_center = fs.getb("refine_r_center", bc.algo.refine_r_center);
   bc.image_topic = fs.gets("image_topic", bc.image_topic);
   bc.pose_topic = fs.gets("pose_topic", bc.pose_topic);
   bc.cmd_topic = fs.gets("cmd_topic", bc.cmd_topic);
@@ -806,7 +802,11 @@ int main(int argc, char **argv) {
              "         tracker can never converge its RANSAC sine fit and will never aim.\n"
              "         Use mode: 1 (small rune) - it exercises exactly the same aim maths.\n";
     }
-    return run_selftest_aim(bc);
+    // 【不要写逐帧 CSV】自检喂的是合成关键点，每个用例都会新建 Pipeline 并按 log_path
+    // 截断重写文件。若沿用真实的 log_path，跑一次自检就会把上一次实测的逐帧日志抹掉。
+    BridgeConfig selftest_cfg = bc;
+    selftest_cfg.algo.log_path.clear();
+    return run_selftest_aim(selftest_cfg);
   }
 
   // ---- replay：视频回放，不需要模拟器 ----

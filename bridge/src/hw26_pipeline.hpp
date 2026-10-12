@@ -73,7 +73,7 @@ enum class RefFrame {
 
 // 检测器后端
 enum class DetectorKind {
-  kHw26,  // HWauto 自带的 YOLO11s-pose（实测在模拟器上输出满画面乱飘的误检，不可用）
+  kHw26,  // HWauto 自带的 YOLO11s-pose（9 关键点，分类颜色 + 激活）—— 目前唯一后端
 };
 
 // 单个检出的类别摘要（用于诊断"检出但被过滤"）
@@ -93,13 +93,14 @@ struct Config {
   std::string model_path;
   std::string device = "CPU";   // OpenVINO 设备名: CPU / GPU / AUTO / NPU
   // 打击板四点的半边长（相对扇叶中心），(0,0,±h),(0,±h,0)。
-  // 两个模型的上/左/下/右四点指同一批物理点，所以共用。两个后端都走桥自实现的
-  // PnP，不调用 HW26 的 Solver（它的 BUFF_POINTS=0.114 在模拟器上距离偏 10%）。
+  // 走桥自实现的 PnP，不调用 HW26 的 Solver（它的 BUFF_POINTS=0.114 用在模拟器上
+  // 会让距离偏大约 10%）。
+  // blade_half_size 是"四角点"那一批物理点的值（历史/sp25 口径，当前无后端使用）。
   double blade_half_size = 0.127;
-  // HW26 后端（t/l/b/r 是八边形相邻顶点的中点）用的是【另一批物理点】，半径不同。
-  // 用两片靶标的图像间距反推真值距离得到：0.127 * 6.4/9.45 ≈ 0.086
-  // （reproj 查不出这个尺度错误：平面靶标 PnP 有尺度不可分辨性）
-  // 【待验证】改完 dis 应≈6.4 m 而不是现在的 9.4 m
+  // HW26 后端的 t/l/b/r 是八边形相邻顶点的【中点】，是另一批物理点，半径不同。
+  // 用两片靶标的图像间距反推真值距离得 0.127 * 6.4/9.45 ≈ 0.086，取 0.088。
+  // 实测：用 0.127 时 dis≈9.4 m，用 0.088 时 dis≈6.5 m（真值≈6.4 m）—— 已验证。
+  // 注意 reproj 查不出这个尺度错误：平面靶标 PnP 有尺度不可分辨性。
   double blade_half_size_hw26 = 0.088;
   // 模拟器给的枪口补偿（POWER_RUNE_INTERFACE.md:105）：
   //   枪口相对相机光心，云台系(X前 Y左 Z上)：前 73.83mm、右 1.08mm、下 28.48mm
@@ -114,11 +115,7 @@ struct Config {
   int buff_mode = 1;    // 1 = 小符, 2 = 大符
   int buff_color = 0;   // 要打的符颜色: 0 = BLUE, 1 = RED
   float confidence_threshold = 0.5f;
-  // 否则自动只给一个（回落成单片）。
-  // 只做【识别 + 画点】：不跑 PnP，于是下游（相位/圆心/预测/弹道/云台/开火）
-  // 全部自然停掉。用于单独验证检测与可视化。
-  int detect_only = 0;                 // 0=只取一个（旧行为）1=允许两个
-  int num_reverse = 0;   // 0=编号 1=A(相位靠前,先打) 1=两组编号对调            // 1=用关键点跨帧匹配定黄/品红身份（防跳变）
+  int num_reverse = 0;   // 0=编号 1=A(相位靠前,先打的那片)；1=两组编号对调
   float nms_threshold = 0.4f;
   // 是否启用 HW26 Selector 的两道过滤（关掉可用于诊断"检出但被过滤"）
   bool filter_color = true;
@@ -173,12 +170,10 @@ struct Config {
   double cmd_smooth_alpha = 0.5;
   double max_aim_step_px = 300.0;
   double stale_ms = 200.0;
-  double max_cmd_step_deg = 0.0;  // 额外的硬限幅，默认关（已被 slew 限幅覆盖）
-  bool refine_r_center = true;
   bool visualize = true;
   int log_every = 1;   // CSV 文件：必须 1（每帧一行）
-  int console_every = 10;
-  int visualize_every = 1;  // 显示节流：1 = 每帧都显示（默认，保证不劣于面板）   // 屏幕打印：每 N 帧一次（不影响 CSV）   // every frame: required for a 1:1 join on sim_t_ns
+  int console_every = 10;   // 屏幕打印：每 N 帧一行（不影响 CSV）
+  int visualize_every = 1;  // 显示节流：1 = 每帧都显示
   std::string log_path;  // 空则不打日志
 };
 
@@ -200,19 +195,17 @@ struct Output {
   double fire_err = -1.0;
   double latency_ms = 0.0;
   double lead_s = 0.0;
-  double fly_s = 0.0;
   float max_score = 0.0f;          // 本帧全候选的最大类别分（不设阈值），用于选 confidence_threshold
   std::vector<DetInfo> dets;       // 本帧所有检出的类别明细
-  // 可视化：两个点，直径相同
+  // 可视化：两个点
   //   绿点 = 未来打击点（预测命中点）
   //   蓝点 = 当前枪管射线与"整个符所在平面"的交点（含枪管 20° 上仰与枪口平移补偿）
+  //          数据仍计算并打印，但已不再绘制
   int green_px_x = -1, green_px_y = -1;
   int blue_px_x = -1, blue_px_y = -1;
-  bool blue_valid = false;
-  double blue_range = -1.0;   // 枪管交点到枪口的距离（诊断用）
-  double face_ex = 0.0;       // 面系下径向矢量出平面分量 |e.x|（应≈0，验证面系成立）
-  double face_tilt_deg = 0.0;
-  double reproj_px = -1.0;
+  double face_ex = 0.0;       // 面系下径向矢量的出平面分量 |e.x|（应≈0，验证面系成立）
+  double face_tilt_deg = 0.0; // 面法向与相机光轴的夹角（视角偏离正对的程度）
+  double reproj_px = -1.0;    // 自检：PnP 四角重投影 vs 检测关键点的最大误差（当前未计算）
   // 双靶标诊断
   int dual_targets = 0;         // 本帧融入了几个靶标（大符正常 = 2）
   double dual_delta_deg = 0.0;  // 吸附后的相位差 Δ（应为 72 或 144 度）
@@ -248,30 +241,23 @@ struct Output {
   int local_n = 0;
   int local_ready = 0;
   double local_w = 0.0;
-  double local_a = 0.0;
   int local_locked = 0;      // 正弦参数是否已锁存
   double local_omega = 0.0;   // 拟合出的 omega（应落在 1.884~2.000）
   double local_amp = 0.0;     // 拟合出的角速度振幅 a（应落在 0.780~1.045）
   double local_rms_deg = -1.0;
   double local_span_deg = 0.0;
-  int local_drop = 0;
+  int local_drop = 0;     // 因跳变被丢掉的帧数（只丢帧、不清窗）
   int local_lost = 0;
-  int local_hit = 0;      // 连续>=2.6s无空窗 -> 判定命中      // 因跳变被丢掉的帧数（只丢帧不清窗）
+  int local_hit = 0;      // 连续 >= hit_s 秒无空窗 -> 判定命中
   // ---- 可视化用（全部在【车体系】，方便直接喂 project_px）----
   // 关键：两片的实测板心要【分开】留着，否则看不出是哪一片坏了/被平均了
   bool meas_a_valid = false;
   bool meas_b_valid = false;
   Eigen::Vector3f meas_a_ch = Eigen::Vector3f::Zero();  // A 片实测板心
   Eigen::Vector3f meas_b_ch = Eigen::Vector3f::Zero();  // B 片实测板心
-  // tracker 自己认为的叶片在哪（白叉）+ 它的轨道圆（用于"一眼判跟踪对不对"）
-  bool trk_valid = false;
-  Eigen::Vector3f trk_rc_ch = Eigen::Vector3f::Zero();  // 转盘中心
-  Eigen::Vector3f trk_u_ch = Eigen::Vector3f::Zero();   // 轨道面内基（车体系）
-  Eigen::Vector3f trk_v_ch = Eigen::Vector3f::Zero();
-  Eigen::Vector3f trk_blade_ch = Eigen::Vector3f::Zero();  // 它认为的叶片位置
   // 每个检出各自的关键点（可视化用）。以前只画 detected[0]，而 detected[0] 是
   // 置信度最高的那个，两片靶标的置信度会互相超过 -> 画出来的点在两片之间来回跳。
-  // 注意这只影响"画什么"，不影响 tracker 的输入（tracker 用的是融合后的相位）。
+  // 注意这只影响"画什么"，不影响 tracker 的输入（tracker 用的是 A 片的相位）。
   std::vector<std::vector<cv::Point2f>> det_kpts;
   // |R_center|：到【转盘中心】的距离。它与转盘的相位无关（转盘中心是固定点），
   // 所以是标定 blade_half_size 的理想判据：
@@ -280,11 +266,9 @@ struct Output {
   double rc_dist_m = -1.0;
   int n_solutions = 0;        // IPPE 给出的解个数
   int sol_pick = -1;          // 本帧选了哪一个
-  double cmd_jump_deg = 0.0;
-  bool cmd_limited = false;
-  bool aim_jumped = false;        // 本帧是否因 aim 瞬移被拒（④ 同款护栏）
+  double cmd_jump_deg = 0.0;      // 与上次有效指令的角度跳变（抖动指标）
   double fire_aim_yaw = 0.0;      // 开火闸用的原始弹道解
-  double fire_aim_pitch = 0.0;   // 本帧指令是否被速率限制夹过  // 与上次有效指令的角度跳变（抖动指标）    // 自检：PnP 四角重投影 vs 检测关键点的最大误差 // 面法向与相机光轴夹角（= 视角偏离正对的程度）
+  double fire_aim_pitch = 0.0;
   cv::Mat debug;  // 仅 cfg.visualize 时填充
 };
 
