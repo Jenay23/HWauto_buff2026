@@ -448,13 +448,21 @@ void LocalRuneTracker::push(double t, double roll) {
   // 代价约 1 帧 (≈42 ms)。只有【连续】丢很多帧（说明真换了一次激活/长时间灭灯）
   // 才清窗。
   if (have_last_) {
-    const double jump = std::abs(wrapPi(roll - last_raw_)) * 180.0 / kPi;
-    if (jump > kMaxJumpDeg) {
+    // ★ 阈值必须随帧间隔缩放。桥每帧耗时可变（实测 p99 ≈ 0.13 s），2.09 rad/s 下
+    //   单帧真实位移可达 15°+；固定 12° 会把正常快帧误判成跳变。更糟的是 drop 时
+    //   不推进 last_raw_，一次误判会让后续每一帧都继续"跳" -> 级联丢帧 -> reset。
+    //   （实测旧逻辑 drop=3487 / 9358 帧 = 37%，窗口永远攒不起来。）
+    const double dt_j = h_.empty() ? meanDt() : std::max(1e-3, t - h_.back().t);
+    const double lim_deg =
+        std::max(kMaxJumpDeg,
+                 std::min(60.0, kMaxSpeed * dt_j * 180.0 / kPi * 1.6));  // 上限 60°
+    if (std::abs(wrapPi(roll - last_raw_)) * 180.0 / kPi > lim_deg) {
       ++jump_dropped_;
-      if (++drop_run_ > 30) {  // 连续丢 >30 帧 -> 认为换激活/长时间无有效数据
-        reset();
-      }
-      return;                  // ★ 不推入本帧，也不更新 last_*
+      // ★ 仍然按解缠增量推进参考，避免"一次 drop -> 后续全部误判"的级联。
+      last_unwrapped_ = last_unwrapped_ + wrapPi(roll - last_raw_);
+      last_raw_ = roll;
+      if (++drop_run_ > 30) reset();   // 连续丢很多才认为换激活/长时间异常
+      return;                          // 本帧不进窗口
     }
   }
   drop_run_ = 0;
