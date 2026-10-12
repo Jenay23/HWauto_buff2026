@@ -367,6 +367,9 @@ Pipeline::Pipeline(const Config &cfg) : impl_(new Impl(cfg)) {
   }
   I.tracker = std::make_unique<buff_algo::BuffTracker>(I.tracker_fs["buff_tracker"]);
   I.tracker->set_mode(cfg.buff_mode == 2 ? BuffMode::BIG_BUFF : BuffMode::SMALL_BUFF);
+  // ★ 关键：local_model 必须【真正】作用到 local_trk，否则它一直用默认 mode 0
+  I.local_trk.set_mode(cfg.local_model);
+  I.local_trk.set_rms_gates(cfg.local_rms_gate_deg);
   I.predictor = std::make_unique<buff_algo::BuffPredictor>(I.tracker_fs["buff_tracker"]);
 
   if (!cfg.log_path.empty()) {
