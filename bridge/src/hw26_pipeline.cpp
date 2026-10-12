@@ -1489,9 +1489,11 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
     const int cx = static_cast<int>(std::lround(I.cfg.camera_matrix.at<double>(0, 2)));
     const int cy = static_cast<int>(std::lround(I.cfg.camera_matrix.at<double>(1, 2)));
 
-    // ---- 绿点：未来打击点（预测命中点）----
+    // ---- 紫点：未来打击点（预测命中点）----
+    // 颜色按用户要求由绿改紫（BGR 240,32,160 = RGB 160,32,240）。
+    // 注意：本文件其余注释与日志里仍把它叫"绿点"，指的是同一个点。
     if (out.green_px_x > 0) {
-      cv::circle(out.debug, {out.green_px_x, out.green_px_y}, 8, cv::Scalar(0, 255, 0),
+      cv::circle(out.debug, {out.green_px_x, out.green_px_y}, 8, cv::Scalar(240, 32, 160),
                  cv::FILLED, cv::LINE_AA);
     }
     // ---- 蓝点（枪管射线 ∩ 符平面）已按用户要求【取消绘制】----

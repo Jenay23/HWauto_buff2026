@@ -218,7 +218,7 @@ struct Output {
   float max_score = 0.0f;          // 本帧全候选的最大类别分（不设阈值），用于选 confidence_threshold
   std::vector<DetInfo> dets;       // 本帧所有检出的类别明细
   // 可视化：两个点
-  //   绿点 = 未来打击点（预测命中点）
+  //   紫点（原绿，BGR 240,32,160）= 未来打击点（预测命中点）
   //   蓝点 = 当前枪管射线与"整个符所在平面"的交点（含枪管 20° 上仰与枪口平移补偿）
   //          数据仍计算并打印，但已不再绘制
   int green_px_x = -1, green_px_y = -1;
