@@ -193,11 +193,19 @@ void LocalRuneTracker::physFit() {
   }
   if (dt_span < 1e-3) return;
   const double coarse = (h_.back().roll - h_.front().roll) / dt_span;
-  const double sgn = (coarse < 0.0) ? -1.0 : 1.0;
+  double sgn = (coarse < 0.0) ? -1.0 : 1.0;
 
-  // --- 粗网格初始化: a x w x phi, th0 线性解出 ---
+  // ★ 滑动窗口 + 参数热启动（近似"滑动窗口 BA 的平滑性"，零额外算法）：
+  //   上一帧已经锁定的 (th0,a,w,phi) 直接作为本帧 LM 初值，不再从粗网格重搜。
+  //   好处：① 输出随新数据连续微调，不做分支跳跃；② 省掉 5*6*12 网格，快一个量级。
+  //   只在上一帧有效且距本帧 <0.5s 时热启动；否则回退粗网格自举。
   double best = 1e18, bth0 = 0.0, ba = 0.9, bw = 1.94, bphi = 0.0;
-  for (int ia = 0; ia <= 4; ++ia) {
+  const bool warm = (phys_valid_ != 0) && last_data_t_ > 0.0 &&
+                    (h_.back().t - last_data_t_) < 0.5;
+  if (warm) {
+    bth0 = phys_th0_; ba = phys_a_; bw = phys_w_; bphi = phys_phi_; sgn = phys_sgn_;
+  }
+  for (int ia = 0; !warm && ia <= 4; ++ia) {
     const double a = kALo + (kAHi - kALo) * ia / 4.0;
     for (int iw = 0; iw <= 5; ++iw) {
       const double w = kWLo + (kWHi - kWLo) * iw / 5.0;
