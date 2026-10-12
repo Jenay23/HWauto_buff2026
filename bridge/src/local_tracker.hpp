@@ -49,7 +49,20 @@ class LocalRuneTracker {
   int jump_dropped() const { return jump_dropped_; }
   bool lost() const { return lost_; }
   bool hit_confirmed() const { return hit_confirmed_; }   // 连续 >=hit_s_ 有靶标 -> 视为命中
-  void on_dark(double t) { last_dark_t_ = t; hit_confirmed_ = false; reset(); }
+  // 灭灯分两种：短暂缺失 -> 滑行（保留参数）；真正灭灯（超过 coast_s_）-> 清空参数。
+  // 依据：模拟器每次【新激活】都会重抽 (a, w)，所以旧参数跨激活没有意义。
+  void on_dark(double t) {
+    if (mode_ == 6 && locked_ != 0 && last_data_t_ > 0.0 && (t - last_data_t_) > coast_s_) {
+      reset();                 // 清空（含快照/命中标记）
+      lost_ = true;            // 报靶标消失（reset 会清掉，所以再置一次）
+      lost_reported_ = true;
+      return;
+    }
+    last_dark_t_ = t;
+    hit_confirmed_ = false;
+    reset();                   // mode6 且未超时 -> reset 内部会走滑行分支（保留参数）
+  }
+  bool lost_reported() const { return lost_reported_; }
   bool coasting() const { return coasting_; }
   int ekf_tot() const { return ekf_tot_; }
 
@@ -113,9 +126,10 @@ class LocalRuneTracker {
   double dt_ema_ = 1.0 / 30.0;
   int jump_dropped_ = 0;
   bool coasting_ = false;
-  mutable bool lost_ = false;   // mutable: predict() 是 const，超时要在里面置位
+  mutable bool lost_ = false;
+  bool lost_reported_ = false;   // mutable: predict() 是 const，超时要在里面置位
   double last_data_t_ = 0.0;
-  double coast_s_ = 1.5;
+  double coast_s_ = 0.4;   // 只容忍【短暂缺失】；超过它 = 真灭灯 -> 清空参数
   double hit_s_ = 2.6;     // 连续这么久都没进空窗 -> 判定命中（激活没结束）
   bool hit_confirmed_ = false;
   double last_dark_t_ = 0.0;
