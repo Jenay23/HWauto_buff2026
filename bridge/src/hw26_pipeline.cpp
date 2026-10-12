@@ -1421,28 +1421,27 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
     // 多个检出各自一组颜色：第 1 组黄（与原行为一致），第 2 组品红，第 3 组起循环。
     // 以前只画 detected[0]，大符时会在两片靶标之间来回跳。
     {
-      static const cv::Scalar kGroupColor[3] = {
-          cv::Scalar(0, 255, 255),   // 黄
-          cv::Scalar(255, 0, 255),   // 品红
-          cv::Scalar(0, 128, 255),   // 橙
+      // 【一组一个颜色：组内六个点同色，两组之间颜色不同】
+      //   组 1 = 黄，组 2 = 品红。半径统一（不再靠大小暗示身份），组号另用数字标出。
+      static const cv::Scalar kGroupColor[2] = {
+          cv::Scalar(0, 255, 255),   // 组 1：黄
+          cv::Scalar(255, 0, 255),   // 组 2：品红
       };
-      // 只画前两组：模拟器加了 --rune 之后，另一个转盘的亮靶标不再出现，
-      // 原来的第 3 组（橙色）已经不会有，绘制删掉。
       const std::size_t kDrawGroups = std::min<std::size_t>(2, out.det_kpts.size());
       for (std::size_t g = 0; g < kDrawGroups; ++g) {
         const cv::Scalar &col = kGroupColor[g];
-        const bool is_second = (g == 1);
         for (const auto &d : out.det_kpts[g]) {
-          cv::circle(out.debug, {static_cast<int>(d.x), static_cast<int>(d.y)},
-                     is_second ? 3 : 4, col, cv::FILLED, cv::LINE_AA);
+          cv::circle(out.debug, {static_cast<int>(d.x), static_cast<int>(d.y)}, 4, col,
+                     cv::FILLED, cv::LINE_AA);
         }
-        // 在每组第一个点旁标出组号，便于区分是哪一片靶标
+        // 编号：默认 1 = A（相位靠前 = 先打的那片）；num_reverse=1 时两组编号对调。
         if (!out.det_kpts[g].empty()) {
           const cv::Point2f &p0 = out.det_kpts[g].front();
+          const std::size_t shown = (I.cfg.num_reverse != 0) ? (kDrawGroups - g) : (g + 1);
           char tag[8];
-          std::snprintf(tag, sizeof(tag), "%zu", g + 1);
+          std::snprintf(tag, sizeof(tag), "%zu", shown);
           cv::putText(out.debug, tag, {static_cast<int>(p0.x) + 6, static_cast<int>(p0.y) - 6},
-                      cv::FONT_HERSHEY_SIMPLEX, 0.6, col, 2, cv::LINE_AA);
+                      cv::FONT_HERSHEY_SIMPLEX, 0.7, col, 2, cv::LINE_AA);
         }
       }
     }

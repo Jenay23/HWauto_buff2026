@@ -122,7 +122,8 @@ struct Config {
   float second_score_ratio = 0.5f;   // ② 第二片 >= 该比例 × 最高分
   float min_sep_px = 60.0f;          // ③ 与第一片中心至少相距这么多像素（挡同片重叠框）
   int sp25_top2 = 1;                 // 0=只取一个（旧行为）1=允许两个
-  int identity_assoc = 1;            // 1=用关键点跨帧匹配定黄/品红身份（防跳变）
+  int identity_assoc = 1;
+  int num_reverse = 0;   // 0=编号 1=A(相位靠前,先打) 1=两组编号对调            // 1=用关键点跨帧匹配定黄/品红身份（防跳变）
   float nms_threshold = 0.4f;
   // 是否启用 HW26 Selector 的两道过滤（关掉可用于诊断"检出但被过滤"）
   bool filter_color = true;
