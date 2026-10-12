@@ -174,7 +174,8 @@ struct Config {
   double max_cmd_step_deg = 0.0;  // 额外的硬限幅，默认关（已被 slew 限幅覆盖）
   bool refine_r_center = true;
   bool visualize = true;
-  int log_every = 1;   // every frame: required for a 1:1 join on sim_t_ns
+  int log_every = 1;   // CSV 文件：必须 1（每帧一行）
+  int console_every = 10;   // 屏幕打印：每 N 帧一次（不影响 CSV）   // every frame: required for a 1:1 join on sim_t_ns
   std::string log_path;  // 空则不打日志
 };
 

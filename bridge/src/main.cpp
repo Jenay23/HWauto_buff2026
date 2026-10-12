@@ -319,6 +319,7 @@ bc.algo.num_reverse = static_cast<int>(fs.getd("num_reverse", bc.algo.num_revers
   bc.algo.fire_enabled = fs.getb("fire_enabled", true);
   bc.algo.visualize = fs.getb("visualize", false);
   bc.algo.log_every = fs.geti("log_every", 30);
+  bc.algo.console_every = fs.geti("console_every", bc.algo.console_every);
   bc.algo.log_path = fs.gets("log_path", "hw26_bridge_log.csv");
   {
     const std::string fr = fs.gets("frame", "face");

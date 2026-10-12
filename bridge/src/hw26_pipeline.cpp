@@ -1332,7 +1332,6 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
     out.debug = bgr.clone();
     const int cx = static_cast<int>(std::lround(I.cfg.camera_matrix.at<double>(0, 2)));
     const int cy = static_cast<int>(std::lround(I.cfg.camera_matrix.at<double>(1, 2)));
-    cv::drawMarker(out.debug, {cx, cy}, cv::Scalar(128, 128, 128), cv::MARKER_CROSS, 20, 2);
 
     // ---- 绿点：未来打击点（预测命中点）----
     if (out.green_px_x > 0) {
@@ -1355,13 +1354,15 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       const std::size_t kDrawGroups = std::min<std::size_t>(2, out.det_kpts.size());
       for (std::size_t g = 0; g < kDrawGroups; ++g) {
         const cv::Scalar &col = kGroupColor[g];
-        for (const auto &d : out.det_kpts[g]) {
-          cv::circle(out.debug, {static_cast<int>(d.x), static_cast<int>(d.y)}, 4, col,
-                     cv::FILLED, cv::LINE_AA);
-        }
+        // ★ 按用户要求：每组只画【1 个点】= 第 9 个（index 8，模型直接输出的旋转中心）
+      if (!out.det_kpts[g].empty()) {
+        const cv::Point2f &d = out.det_kpts[g].back();
+        cv::circle(out.debug, {static_cast<int>(d.x), static_cast<int>(d.y)}, 6, col,
+                   cv::FILLED, cv::LINE_AA);
+      }
         // 编号：默认 1 = A（相位靠前 = 先打的那片）；num_reverse=1 时两组编号对调。
         if (!out.det_kpts[g].empty()) {
-          const cv::Point2f &p0 = out.det_kpts[g].front();
+          const cv::Point2f &p0 = out.det_kpts[g].back();
           const std::size_t shown = (I.cfg.num_reverse != 0) ? (kDrawGroups - g) : (g + 1);
           char tag[8];
           std::snprintf(tag, sizeof(tag), "%zu", shown);
@@ -1401,39 +1402,8 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
                     kCenterB, 2, cv::LINE_AA);
       }
     }
-    char txt[256];
-    const char *st = (out.status == 0)   ? "CONVERGING"
-                     : (out.status == 1) ? "TRACKING"
-                     : (out.status == 2) ? "TEMP_LOST"
-                                         : "LOST";
-    std::snprintf(txt, sizeof(txt), "%s det=%d sel=%d dis=%.2f roll=%.1f w=%.2f err=%.4f%s", st,
-                  out.n_det, out.n_selected, out.buff_dis, out.roll * 180 / M_PI,
-                  out.roll_velocity, out.fire_err, out.fire ? "  FIRE" : "");
-    cv::putText(out.debug, txt, {12, 34}, cv::FONT_HERSHEY_SIMPLEX, 0.7,
-                out.fire ? cv::Scalar(0, 0, 255) : cv::Scalar(0, 255, 0), 2, cv::LINE_AA);
-    std::snprintf(txt, sizeof(txt), "lat=%.0fms lead=%.3fs fly=%.3fs", out.latency_ms, lead, fly);
-    cv::putText(out.debug, txt, {12, 62}, cv::FONT_HERSHEY_SIMPLEX, 0.6,
-                cv::Scalar(0, 255, 255), 1, cv::LINE_AA);
-    std::snprintf(txt, sizeof(txt),
-                  "YELLOW/MAGENTA/ORANGE=3 det groups(9 kpts, 9th=R)  "
-                  "BRIGHT/DARK GREEN=meas blade center 1/2  CYAN ring=R center",
-                  out.blue_range);
-    cv::putText(out.debug, txt, {12, 88}, cv::FONT_HERSHEY_SIMPLEX, 0.5,
-                cv::Scalar(200, 200, 200), 1, cv::LINE_AA);
-    std::snprintf(txt, sizeof(txt),
-                  "BIG GREEN=predicted hit  BLUE=barrel ray on rune plane(%.2fm)  "
-                  "GREY CROSS=optical axis", out.blue_range);
-    cv::putText(out.debug, txt, {12, 134}, cv::FONT_HERSHEY_SIMPLEX, 0.5,
-                cv::Scalar(200, 200, 200), 1, cv::LINE_AA);
-    // 双靶标自检：nt=融合了几片  dlt=吸附后的 Δ  dres=吸附残差(应为几度)
-    //             rcd=两片解出的转盘中心分歧(应为几 cm)  rc=到转盘中心距离(标定用)
-    std::snprintf(txt, sizeof(txt),
-                  "nt=%d dlt=%.0f dres=%.1fdeg rcd=%.2fm rc=%.2fm",
-                  out.dual_targets, out.dual_delta_deg, out.dual_resid_deg, out.dual_rcd_m,
-                  out.rc_dist_m);
-    cv::putText(out.debug, txt, {12, 112}, cv::FONT_HERSHEY_SIMPLEX, 0.55,
-                (out.dual_targets == 2) ? cv::Scalar(0, 255, 0) : cv::Scalar(0, 140, 255), 1,
-                cv::LINE_AA);
+    // ★ 按用户要求：HUD 的 5 行文字全部去掉（省下最贵的 putText）
+
   }
 
   g_stage_acc.mark(4);
