@@ -14,7 +14,6 @@
 #include <opencv2/imgproc.hpp>
 
 #include "buff_algo/common/types.hpp"
-#include "detector_sp25.hpp"
 
 namespace hw26_bridge {
 
@@ -80,7 +79,6 @@ cv::Point2f refine_r_center(const cv::Mat &bgr, const cv::Point2f &rough,
 constexpr int64_t kCandidateCount = 5040;
 constexpr int64_t kOutputColumns = 26;  // 4 + 4 + 9*2
 // 用它把"配置里只写一个 model: 路径"变成可能：后端由输出形状判定。
-constexpr int64_t kSp25OutRows = 17;
 constexpr double kSimPitchLimit = 0.785;
 
 double wrap_pi(double a) {
@@ -192,7 +190,6 @@ struct Pipeline::Impl {
   size_t in_elems = 0;
   buff_algo::BuffDetectorConfig dcfg;
 
-  std::unique_ptr<Sp25Detector> sp25_det;
   // 符面系状态（车体系下）
   bool face_ready = false;
   Eigen::Vector3f n_face = Eigen::Vector3f::UnitX();  // 面法向（车体系，平滑后）
@@ -291,27 +288,26 @@ Pipeline::Pipeline(const Config &cfg) : impl_(new Impl(cfg)) {
   }
   const int64_t out_rows = (oshp.size() == 3) ? static_cast<int64_t>(oshp[1]) : -1;
   const int64_t out_cols = (oshp.size() == 3) ? static_cast<int64_t>(oshp[2]) : -1;
-  if (out_cols == kOutputColumns) {
+  if (out_rows == kCandidateCount && out_cols == kOutputColumns) {
     I.cfg.detector = DetectorKind::kHw26;
-    // 【待验证】换过来之后 dis 应从 ~9.4 m 变成 ~6.4 m
     I.cfg.blade_half_size = I.cfg.blade_half_size_hw26;
-  } else if (out_rows == kSp25OutRows) {
-    I.cfg.detector = DetectorKind::kSp25;
   } else {
     std::ostringstream os;
-    os << "[hw26] FATAL: cannot tell which detector this model is from its output shape [";
+    os << "[hw26] FATAL: model output shape is not HW26 [1," << kCandidateCount << ","
+       << kOutputColumns << "] , got [";
     for (size_t i = 0; i < oshp.size(); ++i) os << (i ? "," : "") << oshp[i];
-    os << "]. Expected HW26 [1," << kCandidateCount << "," << kOutputColumns
-       << "] or sp25 [1," << kSp25OutRows << ",N]. Check the model: line in bridge.yaml.";
+    os << "]. Check the model: line in bridge.yaml.";
     throw std::runtime_error(os.str());
   }
 
-  if (I.cfg.detector == DetectorKind::kSp25) {
-    I.sp25_det = std::make_unique<Sp25Detector>(cfg.model_path);
-    std::cout << "[hw26] detector=sp25(" << cfg.model_path << ") in="
-              << I.sp25_det->input_size().width << "x" << I.sp25_det->input_size().height
-              << "  (6 keypoints, single class: no colour/activation info)" << std::endl;
-  } else {
+  // The HW26 model compile MUST stay outside the else above,
+  // otherwise HW26 also takes the FATAL branch and the bridge exits at startup.
+  I.compiled = I.core.compile_model(model, "CPU");
+  I.req = I.compiled.create_infer_request();
+  std::cout << "[hw26] detector=hw26(" << cfg.model_path
+            << ")  (9 keypoints, colour + activation classified)" << std::endl;
+
+  {
     I.compiled = I.core.compile_model(model, "CPU");
     I.req = I.compiled.create_infer_request();
     std::cout << "[hw26] detector=hw26(" << cfg.model_path
@@ -358,18 +354,6 @@ int Pipeline::self_test_image(const cv::Mat &bgr) {
 
   // 必须按选中的后端跑，否则 --selftest 永远只测 HW26 的模型，
   // 两个后端会打印出逐位相同的"对比"结果（这个 bug 曾经存在过）。
-  if (I.cfg.detector == DetectorKind::kSp25) {
-    const std::optional<Sp25Detection> det = I.sp25_det->detect(bgr, I.cfg.confidence_threshold);
-    if (!det) {
-      std::cout << "  (sp25) no detection above threshold " << I.cfg.confidence_threshold
-                << std::endl;
-      return 0;
-    }
-    std::cout << "  (sp25) det conf=" << det->confidence << " max_score=" << det->max_score
-              << " kpt0=(" << det->kpt[0].x << "," << det->kpt[0].y << ")"
-              << " r_center=(" << det->r_center.x << "," << det->r_center.y << ")" << std::endl;
-    return 1;
-  }
 
   LetterboxInfo info;
   cv::Mat lb = buff_algo::letterbox_image(bgr, info, I.in_size);
@@ -521,60 +505,7 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
     return p;
   };
 
-  if (I.cfg.detector == DetectorKind::kSp25) {
-    // 允许置信度最高的【两个】（第二片要过阈值/比例/分离三条，否则只有一个）
-    std::vector<Sp25Detection> dets;
-    if (I.ext_kpts.size() >= 6) {
-      Sp25Detection d;
-      d.confidence = 1.0f;
-      d.max_score = 1.0f;
-      for (int i = 0; i < 6; ++i) d.kpt[static_cast<std::size_t>(i)] = I.ext_kpts[static_cast<std::size_t>(i)];
-      d.r_center = d.kpt[4] + 1.4f * (d.kpt[5] - d.kpt[4]);
-      d.box = cv::Rect2f(d.kpt[0].x - 20.f, d.kpt[0].y - 20.f, 40.f, 40.f);
-      dets.push_back(d);
-    } else if (I.cfg.sp25_top2 != 0) {
-      dets = I.sp25_det->detect_multi(bgr, I.cfg.confidence_threshold);
-    } else if (auto one = I.sp25_det->detect(bgr, I.cfg.confidence_threshold)) {
-      dets.push_back(*one);
-    }
-    out.n_det = static_cast<int>(dets.size());
-    out.max_score = dets.empty() ? 0.f : dets.front().max_score;
-    out.n_selected = static_cast<int>(dets.size());
-    for (std::size_t ii = 0; ii < dets.size(); ++ii) {
-      const Sp25Detection &det = dets[ii];
-      DetInfo di;
-      di.color = I.cfg.buff_color;
-      di.label = 0;
-      di.confidence = det.confidence;
-      di.cx = det.kpt[0].x;
-      di.cy = det.kpt[0].y;
-      out.dets.push_back(di);
-      std::vector<cv::Point2f> kp;
-      for (const auto &q : det.kpt) kp.push_back(q);
-      out.det_kpts.push_back(kp);   // 与 poses 平行；两个检出时下游的双靶标逻辑自动生效
-      if (ii == 0) {
-        I.last_kpt = kp;
-        I.last_rcenter = det.r_center;
-        if (I.cfg.refine_r_center) {
-          // blade_bottom = kpt[2]（下），blade_center 用模型 bbox 中心
-          const cv::Point2f bc(det.box.x + det.box.width * 0.5f,
-                               det.box.y + det.box.height * 0.5f);
-          I.last_rcenter = refine_r_center(bgr, det.r_center, det.kpt[2], bc);
-          I.last_rcenter_rough = det.r_center;
-          I.have_rcenter_rough = true;
-        }
-        I.have_rcenter = true;
-      }
-      // 走两个后端共用的 PnP（物体点 0.127，见本函数开头的 solve_pose_ippe）
-      // detect_only：不跑 PnP -> poses 为空 -> 下游（相位/圆心/预测/弹道/云台/开火）全停
-      if (I.cfg.detect_only == 0) {
-        if (const auto pose =
-              solve_pose_ippe(det.kpt[0], det.kpt[1], det.kpt[2], det.kpt[3])) {
-          poses.push_back(*pose);
-        }
-      }
-    }
-  } else {
+  {
   // 合成自检（--selftest-aim）注入的关键点：两个后端都必须支持。
   if (I.ext_kpts.size() >= 6) {
     const cv::Point2f &pt = I.ext_kpts[0];
@@ -846,22 +777,6 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
     }
     // 6e) 自检：把 PnP 解出的扇叶四角重投影回图像，与检测到的关键点比对。
     //     误差应 < 1px；若很大说明投影链（轴向/内参）有问题。
-    if (I.cfg.detector == DetectorKind::kSp25 && I.last_kpt.size() >= 4) {
-      const float h = static_cast<float>(I.cfg.blade_half_size);
-      const Eigen::Vector3f obj_l[4] = {{0, 0, h}, {0, h, 0}, {0, 0, -h}, {0, -h, 0}};
-      const Eigen::Matrix3f Rb_gim = p.rotation.toRotationMatrix();
-      double mx = 0.0;
-      for (int k = 0; k < 4; ++k) {
-        const Eigen::Vector3f pc =
-            gimbal_to_cam(p.translation + Rb_gim * obj_l[k]);
-        int px = -1, py = -1;
-        if (!project_cam(pc, I.cfg.camera_matrix, &px, &py)) continue;
-        const double e = std::hypot(static_cast<double>(px) - I.last_kpt[static_cast<std::size_t>(k)].x,
-                                    static_cast<double>(py) - I.last_kpt[static_cast<std::size_t>(k)].y);
-        mx = std::max(mx, e);
-      }
-      out.reproj_px = mx;
-    }
     // 观测系 -> 车体系（meas_* 是观测系里的板心，画图前必须转对）
     auto obs2ch_v = [&](const Eigen::Vector3f &q) -> Eigen::Vector3f {
       if (I.cfg.frame == RefFrame::kFace) return I.R_chassis_face * q;

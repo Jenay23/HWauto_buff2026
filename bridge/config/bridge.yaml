@@ -78,7 +78,6 @@ confidence_threshold: 0.5
 num_reverse: 0                # 0=编号 1=A(相位靠前=先打的那片)；1=两组编号对调
 # 只识别+画点：1=不跑 PnP（下游全停，仅用于验证检测与可视化）
 detect_only: 1
-sp25_top2: 1                 # 0=只取一个（旧行为） 1=允许两个
 nms_threshold: 0.4
 
 # 是否启用 HW26 Selector 的两道过滤（颜色 / 激活状态）。

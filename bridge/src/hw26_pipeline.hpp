@@ -73,7 +73,6 @@ enum class RefFrame {
 
 // 检测器后端
 enum class DetectorKind {
-  kSp25,  // sp_vision_25 的 yolo11_buff_int8（④ 已在模拟器上验证 solved≈94%）
   kHw26,  // HWauto 自带的 YOLO11s-pose（实测在模拟器上输出满画面乱飘的误检，不可用）
 };
 
@@ -115,7 +114,6 @@ struct Config {
   int buff_color = 0;   // 要打的符颜色: 0 = BLUE, 1 = RED
   float confidence_threshold = 0.5f;
   // 否则自动只给一个（回落成单片）。
-  int sp25_top2 = 1;
   // 只做【识别 + 画点】：不跑 PnP，于是下游（相位/圆心/预测/弹道/云台/开火）
   // 全部自然停掉。用于单独验证检测与可视化。
   int detect_only = 0;                 // 0=只取一个（旧行为）1=允许两个
