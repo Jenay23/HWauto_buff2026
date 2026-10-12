@@ -1166,7 +1166,10 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
           center_ok = true;
         }
       }
-      if (center_ok) {
+      // ★ 只要拿到过圆心（have_center）就用 mk_obs 合成观测，而不是等本帧 center_ok。
+      //   否则 obs.roll / dbg_roll_* 会在【圆心系 roll】和【原始 PnP roll】两套约定
+      //   之间随 center_ok 切换，这本身就是相位源跳变（rms 差的窗里 om 顶边界、span 不小）。
+      if (I.have_center) {
         use_a = mk_obs(t0);
         if (have_b) use_b = mk_obs(t1);
       }
