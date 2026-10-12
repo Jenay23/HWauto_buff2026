@@ -45,7 +45,6 @@ inline bool project_cam(const Eigen::Vector3f &p_cam, const cv::Mat &K, int *px,
   return true;
 }
 
-// 复刻 sp25 的 Buff_Detector::get_r_center（buff_detector.cpp:9-76）：
 //   粗估点 + 二值化(灰>100) + 5x5 膨胀 + 圆形 mask + minAreaRect 选最方正且离粗估最近的轮廓
 cv::Point2f refine_r_center(const cv::Mat &bgr, const cv::Point2f &rough,
                             const cv::Point2f &blade_bottom, const cv::Point2f &blade_center) {
@@ -80,7 +79,6 @@ cv::Point2f refine_r_center(const cv::Mat &bgr, const cv::Point2f &rough,
 
 constexpr int64_t kCandidateCount = 5040;
 constexpr int64_t kOutputColumns = 26;  // 4 + 4 + 9*2
-// sp25 的 yolo11_buff_int8：[1, 17, 8400]，17 = 4 bbox + 1 score + 6*2 kpt。
 // 用它把"配置里只写一个 model: 路径"变成可能：后端由输出形状判定。
 constexpr int64_t kSp25OutRows = 17;
 constexpr double kSimPitchLimit = 0.785;
@@ -91,7 +89,6 @@ double wrap_pi(double a) {
   return a;
 }
 
-// 与 ④ sp25_buff 桥一致的云台姿态 -> 旋转矩阵（外部系 X前 Y左 Z上，ZYX 顺序）
 Eigen::Matrix3f gimbal_rotation(float yaw, float pitch, float roll) {
   Eigen::Matrix3f R =
       (Eigen::AngleAxisf(yaw, Eigen::Vector3f::UnitZ()) *
@@ -196,7 +193,6 @@ struct Pipeline::Impl {
   buff_algo::BuffDetectorConfig dcfg;
 
   std::unique_ptr<Sp25Detector> sp25_det;
-  // 自实现的 IPPE + 双解连续性消歧（用 sp25 的物体点，HW26 的 BUFF_POINTS 尺寸不对）
   // 符面系状态（车体系下）
   bool face_ready = false;
   Eigen::Vector3f n_face = Eigen::Vector3f::UnitX();  // 面法向（车体系，平滑后）
@@ -297,7 +293,6 @@ Pipeline::Pipeline(const Config &cfg) : impl_(new Impl(cfg)) {
   const int64_t out_cols = (oshp.size() == 3) ? static_cast<int64_t>(oshp[2]) : -1;
   if (out_cols == kOutputColumns) {
     I.cfg.detector = DetectorKind::kHw26;
-    // HW26 的 t/l/b/r 与 sp25 的 kpt[0..3] 不是同一批物理点，物体点半尺寸必须分开。
     // 【待验证】换过来之后 dis 应从 ~9.4 m 变成 ~6.4 m
     I.cfg.blade_half_size = I.cfg.blade_half_size_hw26;
   } else if (out_rows == kSp25OutRows) {
@@ -312,13 +307,11 @@ Pipeline::Pipeline(const Config &cfg) : impl_(new Impl(cfg)) {
   }
 
   if (I.cfg.detector == DetectorKind::kSp25) {
-    // Sp25Detector 自己会校验 [1,17,8400]，形状不对会抛
     I.sp25_det = std::make_unique<Sp25Detector>(cfg.model_path);
     std::cout << "[hw26] detector=sp25(" << cfg.model_path << ") in="
               << I.sp25_det->input_size().width << "x" << I.sp25_det->input_size().height
               << "  (6 keypoints, single class: no colour/activation info)" << std::endl;
   } else {
-    // 只在这个后端被选中时才编译模型（sp25 模式下不再白加载 38MB 的 HW26 模型）
     I.compiled = I.core.compile_model(model, "CPU");
     I.req = I.compiled.create_infer_request();
     std::cout << "[hw26] detector=hw26(" << cfg.model_path
@@ -550,7 +543,7 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
     for (std::size_t ii = 0; ii < dets.size(); ++ii) {
       const Sp25Detection &det = dets[ii];
       DetInfo di;
-      di.color = I.cfg.buff_color;  // sp25 的模型是单类，颜色靠配置给定
+      di.color = I.cfg.buff_color;
       di.label = 0;
       di.confidence = det.confidence;
       di.cx = det.kpt[0].x;
@@ -583,7 +576,6 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
     }
   } else {
   // 合成自检（--selftest-aim）注入的关键点：两个后端都必须支持。
-  // 之前这里只在 sp25 分支处理 ext_kpts，换成 HW26 后端后 self-test 会全部失败。
   if (I.ext_kpts.size() >= 6) {
     const cv::Point2f &pt = I.ext_kpts[0];
     const cv::Point2f &pl = I.ext_kpts[1];
@@ -639,7 +631,6 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
     for (const auto &q : d.keypoints) one.emplace_back(q.x(), q.y());
     out.det_kpts.push_back(std::move(one));
     // 青环（旋转中心 R）：HW26 的 keypoints[8] 就是模型【直接输出】的转盘中心
-    // （前 8 个是八边形顶点）。sp25 那边没有这个点，只能靠 kpt[4]/kpt[5] 外推；
     // 换回 HW26 后恢复这里，青环与"两片夹角"等几何判断才有依据。
     if (!detected.empty() && detected[0].keypoints.size() > 8) {
       const auto &rc = detected[0].keypoints[8];
@@ -741,11 +732,9 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   }
   out.n_selected = static_cast<int>(selected.size());
 
-  // 5) PnP：与 sp25 分支共用同一套（见本函数开头的 solve_pose_ippe，物体点 0.127）。
   //    刻意不调用 I.solver->solve_pnp()：HW26 的 BuffPnPSolver 内部写死
   //    consts::BUFF_POINTS = 0.114，那是它实车靶板的尺寸，用在模拟器上会让
   //    距离偏大约 10%（实测 10.18% vs 0.127 的 0.18%）。
-  //    BuffDetection 的 t/l/b/r 与 sp25 的 kpt[0..3] 都是"上/左/下/右"同一批物理点。
   {
     int picks[2] = {-1, -1};
     int pi = 0;
@@ -764,7 +753,7 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
     for (int i = 0; i < 2; ++i) out.sol_pick_t[i] = picks[i];
   }
   }  // end if ext_kpts ... else（合成自检 vs 真实推理）
-  }  // end if detector==kSp25 ... else
+  }
 
   // 6-pre) 把本帧解出的位姿存成"上一帧位姿"，供下一帧的双解连续性使用。
   //         存全部（最多 2 片），不做身份绑定。
@@ -917,7 +906,6 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
           // 选支：**不再用"离上一帧圆心更近"** —— 那是双稳态，错一次就锁死在错的
           // 一支，两片相位整体偏 180 度（实测 ra 从 +1.571 跳到 -1.574，差正好 pi）。
           //
-          // 改用【sp25 模型自己输出的 R 中心像素】(I.last_rcenter，来自 det->r_center）：
           // I.last_rcenter / I.have_rcenter)：把两个候选都投到图像，取离它更近的。
           // 为什么可行：两个候选在图像上相距约 57~293 像素（取决于槽距），而这里
           // 只需要二选一，模型中心几厘米的误差完全不影响判定；而精确圆心仍由
@@ -1257,7 +1245,6 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
         project_cam(gimbal_to_cam(p_gim), I.cfg.camera_matrix, &out.aim_px_x, &out.aim_px_y);
       }
 
-      // ================= ④ sp25 桥的四道护栏 =================
       // (1) aim 像素瞬移拒帧：PnP 翻转 / 换扇叶会让 aim 点瞬移 -> 本帧不伺服
       bool aim_jumped = false;
       if (I.have_prev_aim_px && out.aim_px_x > 0) {

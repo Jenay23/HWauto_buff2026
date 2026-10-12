@@ -10,7 +10,6 @@
 //   外部系 X 前 / Y 左 / Z 上；`pitch < 0` 表示抬枪。
 //   rt/gimbal_pose 的 yaw/pitch/roll 与 cmd/gimbal 的 yaw/pitch 同约定。
 //   cmd.pitch = -(弹道仰角 + pitch_offset_rad)，pitch_offset 默认 -20°，
-//   用于抵消枪管相对云台固定上仰 20°（与 ④ sp25_buff 桥同一条符号链，已在模拟器上验证过）。
 #pragma once
 
 #include <array>
@@ -90,14 +89,13 @@ struct Config {
   // 检测后端。**不是从 yaml 读的**：由 Pipeline 构造函数按模型的输出形状自动判定，
   // 所以配置里只写一个 model: 路径，不存在"开关与路径不匹配"的可能。
   //   [1, 5040, 26] -> kHw26（9 关键点，分类 颜色 + 激活）
-  //   [1,   17, 8400] -> kSp25（6 关键点，单类）
   DetectorKind detector = DetectorKind::kHw26;
   // 模型路径（yaml 的 model:）
   std::string model_path;
   // 打击板四点的半边长（相对扇叶中心），(0,0,±h),(0,±h,0)。
   // 两个模型的上/左/下/右四点指同一批物理点，所以共用。两个后端都走桥自实现的
   // PnP，不调用 HW26 的 Solver（它的 BUFF_POINTS=0.114 在模拟器上距离偏 10%）。
-  double blade_half_size = 0.127;       // sp25 后端（4 个关键点）的半径，实测标定过
+  double blade_half_size = 0.127;
   // HW26 后端（t/l/b/r 是八边形相邻顶点的中点）用的是【另一批物理点】，半径不同。
   // 用两片靶标的图像间距反推真值距离得到：0.127 * 6.4/9.45 ≈ 0.086
   // （reproj 查不出这个尺度错误：平面靶标 PnP 有尺度不可分辨性）
@@ -116,7 +114,6 @@ struct Config {
   int buff_mode = 1;    // 1 = 小符, 2 = 大符
   int buff_color = 0;   // 要打的符颜色: 0 = BLUE, 1 = RED
   float confidence_threshold = 0.5f;
-  // 大符双靶标（sp25 后端）：允许置信度最高的两个，但第二片必须同时过下面三条，
   // 否则自动只给一个（回落成单片）。
   int sp25_top2 = 1;
   // 只做【识别 + 画点】：不跑 PnP，于是下游（相位/圆心/预测/弹道/云台/开火）
@@ -170,14 +167,12 @@ struct Config {
   double face_ema = 0.10;         // 前 face_lock_frames 帧
   double face_ema_locked = 0.003; // 之后
   int face_lock_frames = 120;
-  // ===== 以下四个护栏直接对齐 ④ sp25_buff/cpp_lib/buff_vision.cpp:190-200 =====
   // ④ 能在模拟器上跑稳，主要就是靠这四个；缺一个就会把 PnP/滤波噪声放大成晃动。
-  double max_slew_deg_s = 40.0;   // ④ SP25_BUFF_LOOP_MAX_SLEW_DEG（rad/s × dt，帧率无关）
-  double cmd_smooth_alpha = 0.5;  // ④ SP25_BUFF_LOOP_SMOOTH（指令低通）
-  double max_aim_step_px = 300.0; // ④ SP25_BUFF_LOOP_MAX_AIM_STEP_PX（aim 瞬移拒帧）
-  double stale_ms = 200.0;        // ④ SP25_BUFF_STALE_MS
+  double max_slew_deg_s = 40.0;
+  double cmd_smooth_alpha = 0.5;
+  double max_aim_step_px = 300.0;
+  double stale_ms = 200.0;
   double max_cmd_step_deg = 0.0;  // 额外的硬限幅，默认关（已被 slew 限幅覆盖）
-  // 是否启用 sp25 的 R 中心精修（二值化100+5x5膨胀+圆mask+minAreaRect）
   bool refine_r_center = true;
   bool visualize = true;
   int log_every = 1;   // every frame: required for a 1:1 join on sim_t_ns
@@ -245,7 +240,6 @@ struct Output {
   double dbg_roll_b = 0.0;
   double dbg_rca_m = -1.0;   // 两片各自解出的 R_center 距离
   double dbg_rcb_m = -1.0;
-  // 选支诊断：两个候选圆心投影到图像后，各自与 sp25 模型自己输出的 R 中心的像素距离
   double cand_px[2] = {-1.0, -1.0};
   // 桥自己的局部相位 tracker 的诊断：样本数 / 是否 ready / 角速度 / 角加速度
   int local_n = 0;

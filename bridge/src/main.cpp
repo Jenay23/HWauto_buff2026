@@ -259,7 +259,6 @@ BridgeConfig load_config(const std::string &path) {
   const FlatConfig fs = parse_flat(path);
 
   // 检测后端不再从配置读：只写一个 model: 路径，Pipeline 按模型的输出形状判定
-  // （[1,5040,26]->HW26, [1,17,8400]->sp25），因此不可能出现"开关与路径不匹配"。
   bc.algo.model_path = fs.gets("model", bc.algo.model_path);
   bc.algo.blade_half_size = fs.getd("blade_half_size", bc.algo.blade_half_size);
   bc.algo.blade_half_size_hw26 =
