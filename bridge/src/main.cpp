@@ -380,6 +380,7 @@ bc.algo.num_reverse = static_cast<int>(fs.getd("num_reverse", bc.algo.num_revers
   bc.algo.filter_color = fs.getb("filter_color", true);
   bc.algo.filter_activation = fs.getb("filter_activation", true);
   bc.algo.dual_target = fs.getb("dual_target", true);
+  bc.algo.chord_phase = fs.getb("chord_phase", false);
   bc.algo.phase_ma_n = static_cast<int>(fs.getd("phase_ma_n", bc.algo.phase_ma_n));
   bc.algo.local_tracker = static_cast<int>(fs.getd("local_tracker", bc.algo.local_tracker));
   bc.algo.local_model =

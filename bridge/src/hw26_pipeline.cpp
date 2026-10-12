@@ -618,7 +618,8 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   };
   auto solve_pose_ippe = [&](const cv::Point2f &pt, const cv::Point2f &pl,
                              const cv::Point2f &pb, const cv::Point2f &pr,
-                             int *pick_out = nullptr) -> std::optional<Pose3f> {
+                             int *pick_out = nullptr,
+                             std::vector<Pose3f> *all_out = nullptr) -> std::optional<Pose3f> {
     const std::vector<cv::Point2f> img = {pt, pl, pb, pr};
     std::vector<cv::Mat> rvecs, tvecs;
     std::vector<double> errs;
@@ -629,6 +630,26 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       return std::nullopt;
     }
     if (rvecs.empty()) return std::nullopt;
+
+    // 把 IPPE 的【全部解】也导出（云台系），供"两片联合消歧"使用：
+    // 单片连续性判据在遮挡/翻转时不可靠，而两片同属一个刚性转盘，几何约束强得多。
+    if (all_out) {
+      all_out->clear();
+      for (std::size_t k = 0; k < rvecs.size(); ++k) {
+        const Eigen::Vector3f t_c(static_cast<float>(tvecs[k].at<double>(0)),
+                                  static_cast<float>(tvecs[k].at<double>(1)),
+                                  static_cast<float>(tvecs[k].at<double>(2)));
+        cv::Mat Rk;
+        cv::Rodrigues(rvecs[k], Rk);
+        Eigen::Matrix3f Re;
+        for (int a = 0; a < 3; ++a)
+          for (int b = 0; b < 3; ++b) Re(a, b) = static_cast<float>(Rk.at<double>(a, b));
+        Pose3f q;
+        q.translation = R_cam2gim * t_c;
+        q.rotation = Eigen::Quaternionf(R_cam2gim * Re).normalized();
+        all_out->push_back(q);
+      }
+    }
 
     // 双解消歧：首帧取重投影误差小者；此后取与上一帧更连续者
     int pick = 0;
@@ -853,19 +874,68 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   {
     int picks[2] = {-1, -1};
     int pi = 0;
+    std::vector<std::vector<Pose3f>> cand_sets;   // 与 poses 平行（只含 PnP 成功的）
     for (std::size_t si = 0; si < selected.size(); ++si) {
     const auto &b = selected[si];
       int pk = -1;
+      std::vector<Pose3f> cands;
       if (const auto pose =
               solve_pose_ippe(cv::Point2f(b.t.x(), b.t.y()), cv::Point2f(b.l.x(), b.l.y()),
-                              cv::Point2f(b.b.x(), b.b.y()), cv::Point2f(b.r.x(), b.r.y()), &pk)) {
+                              cv::Point2f(b.b.x(), b.b.y()), cv::Point2f(b.r.x(), b.r.y()), &pk,
+                              &cands)) {
         poses.push_back(*pose);
+        cand_sets.push_back(std::move(cands));
         // ★ 与 poses 同步记录：只有 PnP 成功的才 push，两边永远一一对应
         pose_src.push_back(selected_src.size() > si ? selected_src[si] : si);
         if (pi < 2) picks[pi++] = pk;
       }
     }
     for (int i = 0; i < 2; ++i) out.sol_pick_t[i] = picks[i];
+
+    // ★★ 两片联合消歧（IPPE 双解的正确打开方式）★★
+    //   两个靶标刚性固连在同一转盘上，因此正确的那对 IPPE 解必须同时满足：
+    //     ① 面内弦长落在相邻槽位 {0.823, 1.331} m 之一；
+    //     ② 两片共面（沿符面法向的坐标相同）。
+    //   法向 n 用【上一帧平滑后的符面法向】（符静止 -> 它是常量，与本次选择无关，
+    //   所以不存在"用被选解反过来定义平面"的循环依赖）。
+    //   这是逐帧、无历史依赖的离散选择：4 个组合里只有一个是物理自洽的，
+    //   从根上掐掉 IPPE 翻转造成的相位跳变（实测 rcd 可达 0.89 m、dres 达 35°）。
+    if (I.cfg.dual_target && I.face_ready && cand_sets.size() >= 2 && poses.size() >= 2 &&
+        !cand_sets[0].empty() && !cand_sets[1].empty()) {
+      const Eigen::Vector3f n = I.n_face;
+      const double R = static_cast<double>(buff_algo::consts::BUFF_RADIUS);
+      const double slots[2] = {2.0 * R * std::sin(0.5 * 2.0 * M_PI / 5.0),
+                               2.0 * R * std::sin(1.0 * 2.0 * M_PI / 5.0)};
+      double best = 1e18;
+      int b0 = -1, b1 = -1;
+      for (std::size_t i = 0; i < cand_sets[0].size(); ++i) {
+        for (std::size_t j = 0; j < cand_sets[1].size(); ++j) {
+          const Eigen::Vector3f t0 = R_cg * cand_sets[0][i].translation;
+          const Eigen::Vector3f t1 = R_cg * cand_sets[1][j].translation;
+          const double o0 = t0.dot(n), o1 = t1.dot(n);
+          const Eigen::Vector3f a = t0 - static_cast<float>(o0) * n;
+          const Eigen::Vector3f bq = t1 - static_cast<float>(o1) * n;
+          const double d = (a - bq).norm();
+          const double ds = std::min(std::abs(d - slots[0]), std::abs(d - slots[1]));
+          const double cost = ds + 0.5 * std::abs(o0 - o1);
+          if (cost < best) { best = cost; b0 = static_cast<int>(i); b1 = static_cast<int>(j); }
+        }
+      }
+      if (b0 >= 0 && b1 >= 0) {
+        const Eigen::Vector3f t0 = R_cg * cand_sets[0][b0].translation;
+        const Eigen::Vector3f t1 = R_cg * cand_sets[1][b1].translation;
+        const double o0 = t0.dot(n), o1 = t1.dot(n);
+        const double d = ((t0 - static_cast<float>(o0) * n) -
+                          (t1 - static_cast<float>(o1) * n)).norm();
+        const double ds = std::min(std::abs(d - slots[0]), std::abs(d - slots[1]));
+        if (ds < 0.12 && std::abs(o0 - o1) < 0.20) {   // 自洽才采纳
+          poses[0] = cand_sets[0][b0];
+          poses[1] = cand_sets[1][b1];
+          out.sol_pick_t[0] = b0;
+          out.sol_pick_t[1] = b1;
+        }
+      }
+    }
   }
   }  // end if ext_kpts ... else（合成自检 vs 真实推理）
   }
@@ -1204,7 +1274,7 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       //        ③ 身份换片只会让候选整体平移 Δ，用"离上一帧最近"即可稳定消歧，
       //           不会再像 PnP roll 那样每帧跳 180°/72°。
       //   Δ 由弦长自身给出（对朝向免疫）：chord = 2R sin(Δ/2)。
-      if (is_face && have_t1 && out.meas_a_valid) {
+      if (I.cfg.chord_phase && is_face && have_t1 && out.meas_a_valid) {
         const double dy = static_cast<double>(t1.y() - t0.y());
         const double dz = static_cast<double>(t1.z() - t0.z());
         const double chord_len = std::hypot(dy, dz);
