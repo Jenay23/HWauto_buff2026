@@ -1264,6 +1264,20 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       //   所以 predict() 的 theta_A(t+lead) 代回同一公式，就恒等于橙点 lead 秒后的位置。
       double theta_feed = static_cast<double>(obs.roll);   // 兜底：中心或板心无效时用原 roll
       bool theta_from_chord = false;
+      bool theta_fused = false;
+      // ★★★ 两片 roll 融合（本步实验，默认开）★★★
+      //   两片刚性固连同一转盘 -> roll_B = roll_A + Δ (Δ = k·72°)。
+      //   对齐后平均：噪声降 sqrt(2)，且【完全不用位置/圆心】—— 实测圆心换支会让
+      //   theta 产生 +131° 的持续相移（23:21 日志第 27 帧），融合路径没有这个源。
+      //   两片不一致（某片翻解）时残差大 -> 自动退回单片 roll，不把坏值混进去。
+      if (I.cfg.phase_fuse_dual && out.dual_targets == 2) {
+        const double delta = out.dual_delta_deg * M_PI / 180.0;
+        const double resid = wrap_pi(out.dbg_roll_b - out.dbg_roll_a - delta);
+        if (std::abs(resid) * 180.0 / M_PI < 20.0) {
+          theta_feed = wrap_pi(out.dbg_roll_a + 0.5 * resid);
+          theta_fused = true;
+        }
+      }
       // ★★★ 弦相位（创新，圆心无关）★★★
       //   两片点亮的靶标刚性固连在同一转盘上，所以它们的连线向量也随转盘【刚体旋转】：
       //       chord = p_B - p_A ∝ (sin η, cos η),  η = θ_A + Δ/2,  Δ = k·72°
@@ -1274,7 +1288,7 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       //        ③ 身份换片只会让候选整体平移 Δ，用"离上一帧最近"即可稳定消歧，
       //           不会再像 PnP roll 那样每帧跳 180°/72°。
       //   Δ 由弦长自身给出（对朝向免疫）：chord = 2R sin(Δ/2)。
-      if (I.cfg.chord_phase && is_face && have_t1 && out.meas_a_valid) {
+      if (!theta_fused && I.cfg.chord_phase && is_face && have_t1 && out.meas_a_valid) {
         const double dy = static_cast<double>(t1.y() - t0.y());
         const double dz = static_cast<double>(t1.z() - t0.z());
         const double chord_len = std::hypot(dy, dz);
@@ -1296,7 +1310,7 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
           theta_from_chord = true;
         }
       }
-      if (!theta_from_chord && out.meas_a_valid) {
+      if (!theta_fused && !theta_from_chord && out.meas_a_valid) {
         // 单片兜底：还是用圆心（老路径），保证单片也能工作
         const Eigen::Vector3f p_face = I.R_chassis_face.transpose() * out.meas_a_ch;
         const double dy = static_cast<double>(I.center_face.y() - p_face.y());
@@ -1306,7 +1320,7 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       I.last_local_theta = theta_feed;
       I.have_last_local_theta = true;
       out.local_theta = theta_feed;
-      out.local_chord = theta_from_chord ? 1 : 0;
+      out.local_chord = theta_fused ? 2 : (theta_from_chord ? 1 : 0);
       I.local_trk.push(t_rel, theta_feed);
       out.local_n = I.local_trk.n();
       out.local_ready = I.local_trk.ready() ? 1 : 0;

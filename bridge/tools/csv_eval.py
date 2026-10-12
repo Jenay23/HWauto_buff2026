@@ -23,7 +23,8 @@ def main(path):
     if not rows: print("no rows"); return
     print(f"CSV rows={len(rows)} span={rows[-1]['t']-rows[0]['t']:.1f}s ctrl={sum(r['ctrl'] for r in rows)} fire={sum(r['fire'] for r in rows)}")
     lit=[r for r in rows if r["det"]>0 and r["sol"]==1]
-    print(f"lit={len(lit)}  其中 ch=1 比例={100.0*sum(r['ch'] for r in lit)/max(1,len(lit)):.1f}%")
+    from collections import Counter
+    print(f"lit={len(lit)}  相位来源分布={dict(Counter(r['ch'] for r in lit))} (0=圆心 1=弦 2=两片roll融合)")
     wins=[];cur=[];prev=None
     for r in lit:
         if prev is not None and r["t"]-prev>0.25:
