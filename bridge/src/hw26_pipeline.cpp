@@ -1436,7 +1436,10 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   //   现在：局部可用即可进（滑行时 ready() 仍为真，所以也包含灭灯期）。
   const bool local_ok =
       (I.cfg.local_tracker != 0) && I.local_trk.ready() && I.have_center;
-  if ((out.solved && trackable) || local_ok) {
+  // ★ 本地 ready 时优先用本地；aim_local_only=1 时本地未 ready 就【不出瞄准】，
+  //   避免回退到会转圈的 HW26 predictor（实测 438/682 控制帧来自它）。
+  const bool local_only = I.cfg.aim_local_only && (I.cfg.local_tracker != 0);
+  if (local_ok || (!local_only && out.solved && trackable)) {
     const double alg_lag =
         (I.cfg.alg_latency > 0.0) ? I.cfg.alg_latency : I.last_latency_ms / 1000.0;
     // 相位滤波带来的滞后：滑动平均 N 帧 -> 相位代表的是 (N-1)/2 帧之前的时刻，
@@ -1469,9 +1472,9 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
     for (int it = 0; it < 5; ++it) {
       // 预测命中点：HW26 到 TRACKING 就用它的 predictor（4 参数正弦外推）；
       // 否则用桥自己的局部 tracker（相位二次外推，6~8 个样本即可用）。
-      if (out.status == static_cast<int>(StatusType::TRACKING)) {
-        aim_pt = I.predictor->predict_position(static_cast<float>(lead));
-      } else {
+      // 优先级翻转：本地 mode7 ready 就用本地（它带 rms 门，可信）；
+      // 只有本地不可用、且没开 local_only 时才回退 HW26 predictor。
+      if (local_ok) {
         double roll_pred = 0.0;
         if (!I.local_trk.predict(t_rel + lead, &roll_pred)) {
           aim_valid = false;
@@ -1481,6 +1484,12 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
         aim_pt.x() = I.center_face.x();
         aim_pt.y() = I.center_face.y() - R * std::cos(static_cast<float>(roll_pred));
         aim_pt.z() = I.center_face.z() + R * std::sin(static_cast<float>(roll_pred));
+      } else if (out.status == static_cast<int>(StatusType::TRACKING)) {
+        // 仅当没开 local_only 且本地不可用时才回退（会转圈的旧路径）
+        aim_pt = I.predictor->predict_position(static_cast<float>(lead));
+      } else {
+        aim_valid = false;
+        break;
       }
       const Eigen::Vector3f p_ch = to_chassis(aim_pt);
       const double d = std::hypot(static_cast<double>(p_ch.x()), static_cast<double>(p_ch.y()));

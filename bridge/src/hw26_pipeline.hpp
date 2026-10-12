@@ -193,6 +193,11 @@ struct Config {
   // 实测开火命令 97% 间隔 <0.2s、开火时 status 有 261 帧是 CONVERGING(0)。
   // 现在只在【预测可信】时允许开火：本地模型 ready、rms 小、样本够。
   // 命中后换组时模型会短暂失锁 -> 自动停火，等重新锁定再打（正好治"打中了又打"）。
+  // 瞄准预测来源：本地 mode7 模型 ready 时【优先用它】，不要被 HW26 的 predictor
+  // 接管。实测 control=1 的 682 帧里 438 帧走了 HW26（status=TRACKING），
+  // aim 跳变 p90=136px、12% >100px —— 紫点绕符心转圈的主因。
+  // aim_local_only=1 时：本地未 ready 就不出瞄准（宁可不瞄，不转圈）。
+  bool aim_local_only = true;
   bool fire_require_lock = true;
   double fire_rms_gate_deg = 15.0;
   int fire_min_n = 15;

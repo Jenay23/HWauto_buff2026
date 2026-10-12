@@ -406,6 +406,7 @@ bc.algo.num_reverse = static_cast<int>(fs.getd("num_reverse", bc.algo.num_revers
   bc.algo.fire_stable_frames = fs.geti("fire_stable_frames", 3);
   bc.algo.fire_cooldown = fs.getd("fire_cooldown", 1.0);
   bc.algo.fire_enabled = fs.getb("fire_enabled", true);
+  bc.algo.aim_local_only = fs.getb("aim_local_only", true);
   bc.algo.fire_require_lock = fs.getb("fire_require_lock", true);
   bc.algo.fire_rms_gate_deg = fs.getd("fire_rms_gate_deg", 15.0);
   bc.algo.fire_min_n = fs.geti("fire_min_n", 15);
@@ -906,6 +907,9 @@ int main(int argc, char **argv) {
     // 截断重写文件。若沿用真实的 log_path，跑一次自检就会把上一次实测的逐帧日志抹掉。
     BridgeConfig selftest_cfg = bc;
     selftest_cfg.algo.log_path.clear();
+    // 自检注入的是【静止相位】，本地 tracker 不会 ready；必须允许回退 HW26 predictor
+    // 才能验算瞄准数学（与 aim_local_only 的现场策略无关）。
+    selftest_cfg.algo.aim_local_only = false;
     return run_selftest_aim(selftest_cfg);
   }
 
