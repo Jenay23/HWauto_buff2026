@@ -72,6 +72,7 @@ class LocalRuneTracker {
   void set_max_rms_deg(double d) { max_rms_deg_ = d; }
   void set_relock_rms_deg(double d) { relock_rms_deg_ = d; }
   void set_rms_gates(double d) { max_rms_deg_ = d; relock_rms_deg_ = d; }
+  void set_coast_s(double s) { coast_s_ = s; }
   void set_ridge(double r) { ridge_ = r; }
   void set_mode(int m) {
     mode_ = m;
@@ -129,7 +130,7 @@ class LocalRuneTracker {
   mutable bool lost_ = false;
   bool lost_reported_ = false;   // mutable: predict() 是 const，超时要在里面置位
   double last_data_t_ = 0.0;
-  double coast_s_ = 0.4;   // 只容忍【短暂缺失】；超过它 = 真灭灯 -> 清空参数
+  double coast_s_ = 0.2;   // 只容忍【短暂缺失】；超过它 = 真灭灯 -> 清空参数
   double hit_s_ = 2.6;     // 连续这么久都没进空窗 -> 判定命中（激活没结束）
   bool hit_confirmed_ = false;
   double last_dark_t_ = 0.0;

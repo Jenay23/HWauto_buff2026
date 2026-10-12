@@ -305,6 +305,7 @@ bc.algo.num_reverse = static_cast<int>(fs.getd("num_reverse", bc.algo.num_revers
   bc.algo.local_model =
       static_cast<int>(fs.getd("local_model", bc.algo.local_model));
   bc.algo.local_rms_gate_deg = fs.getd("local_rms_gate_deg", bc.algo.local_rms_gate_deg);
+  bc.algo.local_coast_s = fs.getd("local_coast_s", bc.algo.local_coast_s);
   bc.algo.bullet_speed = fs.getd("bullet_speed", 22.0);
   bc.algo.gravity = fs.getd("gravity", 9.81);
   bc.algo.yaw_offset_deg = fs.getd("yaw_offset_deg", 0.0);

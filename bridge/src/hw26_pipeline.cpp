@@ -370,6 +370,7 @@ Pipeline::Pipeline(const Config &cfg) : impl_(new Impl(cfg)) {
   // ★ 关键：local_model 必须【真正】作用到 local_trk，否则它一直用默认 mode 0
   I.local_trk.set_mode(cfg.local_model);
   I.local_trk.set_rms_gates(cfg.local_rms_gate_deg);
+  I.local_trk.set_coast_s(cfg.local_coast_s);
   I.predictor = std::make_unique<buff_algo::BuffPredictor>(I.tracker_fs["buff_tracker"]);
 
   if (!cfg.log_path.empty()) {
