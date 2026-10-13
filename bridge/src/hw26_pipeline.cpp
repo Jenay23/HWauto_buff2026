@@ -1460,6 +1460,9 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   const BuffState state = I.tracker->get_state();
   out.roll = state.roll;
   out.roll_velocity = state.roll_velocity;
+  // ★ 每帧先清空"未来打击点"有效位：紫点只在【本帧真的拟合出瞄准解】时才画，
+  //   没有拟合出来就消失，不再停留在上一帧的位置（用户要求）。
+  I.aim_ch_valid = false;
 
   // 8) 预测 + 弹道 + 云台角
   const bool trackable = (out.status == static_cast<int>(StatusType::TRACKING));
