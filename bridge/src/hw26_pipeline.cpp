@@ -792,6 +792,11 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
     di.confidence = d.detection.confidence;
     di.cx = d.detection.t.x();
     di.cy = d.detection.t.y();
+    // 原始 9 个关键点展平成 18 个数（图像像素，letterbox 已还原）
+    for (int k = 0; k < 9; ++k) {
+      di.kpts[2 * k] = d.keypoints[k].x();
+      di.kpts[2 * k + 1] = d.keypoints[k].y();
+    }
     out.dets.push_back(di);
   }
 

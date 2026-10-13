@@ -84,6 +84,9 @@ struct DetInfo {
   int label = -1;   // 0=未激活 1=已激活
   float confidence = 0.0f;
   float cx = 0.0f, cy = 0.0f;
+  // 模型的原始 9 个关键点 (x,y)，展平成 18 个数 —— 用于和模拟器真值逐点比对。
+  // keypoints[0..7] = 打击板八边形 8 角，keypoints[8] = R 中心。
+  std::array<float, 18> kpts{};
 };
 
 struct Config {

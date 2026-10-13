@@ -1025,7 +1025,27 @@ int main(int argc, char **argv) {
           std::lock_guard<std::mutex> lk(g_kpts_mu);
           kj = g_kpts_json;
         }
-        if (!kj.empty()) g_kpts_log << f.timestamp_ns << ',' << kj << '\n';
+        if (kj.empty()) kj = "null";
+        // 模型的原始输出：每个检出 cls/conf/中心 + 9 个关键点(展平 18 个数)
+        std::string mj = "[";
+        for (std::size_t di = 0; di < out.dets.size(); ++di) {
+          const auto &d = out.dets[di];
+          if (di) mj += ',';
+          char hb[96];
+          std::snprintf(hb, sizeof(hb),
+                        "{\"cls\":%d,\"conf\":%.3f,\"cx\":%.1f,\"cy\":%.1f,\"kpts\":[",
+                        d.color * 2 + d.label, d.confidence, d.cx, d.cy);
+          mj += hb;
+          for (int k = 0; k < 18; ++k) {
+            char nb[32];
+            std::snprintf(nb, sizeof(nb), "%.1f", d.kpts[k]);
+            if (k) mj += ',';
+            mj += nb;
+          }
+          mj += "]}";
+        }
+        mj += ']';
+        g_kpts_log << f.timestamp_ns << ",{\"sim\":" << kj << ",\"model\":" << mj << "}\n";
       }
 
       const bool control = fresh && out.control;
