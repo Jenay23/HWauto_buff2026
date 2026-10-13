@@ -392,6 +392,7 @@ bc.algo.num_reverse = static_cast<int>(fs.getd("num_reverse", bc.algo.num_revers
   bc.algo.center_hist_min = static_cast<int>(fs.getd("center_hist_min", bc.algo.center_hist_min));
   bc.algo.center_hist_span_m = fs.getd("center_hist_span_m", bc.algo.center_hist_span_m);
   bc.algo.center_hist_gate_m = fs.getd("center_hist_gate_m", bc.algo.center_hist_gate_m);
+  bc.algo.pos_gate_m = fs.getd("pos_gate_m", bc.algo.pos_gate_m);
   bc.algo.center_hist_keep_s = fs.getd("center_hist_keep_s", bc.algo.center_hist_keep_s);
   bc.algo.bullet_speed = fs.getd("bullet_speed", 22.0);
   bc.algo.gravity = fs.getd("gravity", 9.81);

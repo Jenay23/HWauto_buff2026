@@ -1300,6 +1300,17 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
     // 6f-0b) 喂桥自己的局部相位 tracker（用【滤波前】的原始相位：
     //        它内部本来就是滑动窗口最小二乘，会自己平滑；喂平滑过的会叠加滞后）。
     if (I.cfg.local_tracker) {
+      // ★★ 位置内点门（方案 A）★★ 用已拟合的圆（圆心 C、半径 0.7）判 |t−C|−0.7：
+      //   超门的当帧判为 IPPE 位置野值 -> 不喂相位、且不用它做橙点锚定（退回圆上取点）。
+      //   离线实测（2602 个板心位置）：gate=0.12 m 保留 75%，中点逐帧位移 p90 0.42->0.22 m。
+      bool pos_outlier = false;
+      if (I.have_center && out.meas_a_valid) {
+        const Eigen::Vector3f p_face = I.R_chassis_face.transpose() * out.meas_a_ch;
+        const double rad = std::hypot(static_cast<double>(p_face.y() - I.center_face.y()),
+                                      static_cast<double>(p_face.z() - I.center_face.z()));
+        if (std::abs(rad - static_cast<double>(r)) > I.cfg.pos_gate_m) pos_outlier = true;
+      }
+      if (pos_outlier) out.meas_a_valid = false;   // 橙点锚定退回圆上取点
       // 让 绿点 = 橙点的预测 成为恒等式：
       //   以前把 PnP 的 roll 直接喂给局部 tracker，而橙点 meas_a_ch 是 PnP 解出的板心位置，
       //   绿点又是理想圆上按 theta 外推的点 —— 两条不同几何路径，两者会偏几十像素。
@@ -1376,12 +1387,14 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
         const double dz = static_cast<double>(p_face.z() - I.center_face.z());
         if (std::hypot(dy, dz) > 1e-3) theta_feed = std::atan2(dz, dy);
       }
-      I.last_local_theta = theta_feed;
-      I.have_last_local_theta = true;
-      out.local_theta = theta_feed;
-      out.local_chord = theta_roll ? 2 : (theta_from_chord ? 1 : 0);
       out.local_phys_rej = I.local_trk.phys_rej();
-      I.local_trk.push(t_rel, theta_feed);
+      if (!pos_outlier) {   // 野值帧不喂、也不更新连续性参考
+        I.last_local_theta = theta_feed;
+        I.have_last_local_theta = true;
+        out.local_theta = theta_feed;
+        out.local_chord = theta_roll ? 2 : (theta_from_chord ? 1 : 0);
+        I.local_trk.push(t_rel, theta_feed);
+      }
       out.local_n = I.local_trk.n();
       out.local_ready = I.local_trk.ready() ? 1 : 0;
       out.local_w = I.local_trk.velocity();

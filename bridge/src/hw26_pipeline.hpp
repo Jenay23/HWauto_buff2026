@@ -168,6 +168,9 @@ struct Config {
   int center_hist_min = 8;            // 圆拟合所需最少样本数
   double center_hist_span_m = 0.05;   // 样本在面内的最小跨度（弧太短 -> 法方程病态）
   double center_hist_gate_m = 0.15;   // 外点门：||t-C| - 0.7| 超过它就当外点剔除
+  // 位置内点门（方案A）：喂相位/做橙点锚定之前，再用圆判一次 | |t-C| - 0.7 |。
+  // 超门的那帧判为 IPPE 位置野值 -> 不喂、不锚定。离线实测 0.12 m 保留 75%。
+  double pos_gate_m = 0.12;
   double center_hist_keep_s = 8.0;    // 历史只保留最近这么久（圆心静止，限内存而已）
 
   // 弹道 / 瞄准
