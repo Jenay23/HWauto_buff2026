@@ -22,6 +22,7 @@
 #include <iostream>
 #include <mutex>
 #include <random>
+#include <ctime>
 #include <string>
 #include <thread>
 #include <utility>
@@ -998,8 +999,18 @@ int main(int argc, char **argv) {
   std::thread worker([&] {
     std::vector<uint8_t> buf;
     int64_t stamp = 0;
-    // 真值日志：每处理一帧写一行 "图片时间戳纳秒,<rt/rune_kpts JSON>"
-    g_kpts_log.open("hw26_rune_kpts_log.jsonl", std::ios::trunc);
+    // 真值日志：每处理一帧写一行 "图片时间戳纳秒,{sim,model}"。
+    // 每次运行一个独立文件名（带启动时刻），否则多次跑会互相覆盖。
+    {
+      std::time_t t_now = std::time(nullptr);
+      std::tm tm_buf{};
+      localtime_r(&t_now, &tm_buf);
+      char name_buf[64];
+      std::strftime(name_buf, sizeof(name_buf), "hw26_rune_kpts_%Y%m%d_%H%M%S.jsonl",
+                    &tm_buf);
+      g_kpts_log.open(name_buf, std::ios::trunc);
+      std::cout << "[bridge] rune-kpts log -> " << name_buf << std::endl;
+    }
     while (!g_stop.load()) {
       if (!g_frame.take(&buf, &stamp)) continue;
       GimbalPose pose;
