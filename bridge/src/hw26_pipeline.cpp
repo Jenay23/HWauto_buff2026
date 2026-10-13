@@ -518,13 +518,13 @@ Pipeline::Pipeline(const Config &cfg) : impl_(new Impl(cfg)) {
                "cmd_yaw_deg,cmd_pitch_deg,fire_err_rad,control,fire,"
                // appended (2026-10: diagnostics that were only on stdout before)
                //   ex_m            |e.x| of the face-frame radial vector, should be ~0
-               //   reproj_px       max reprojection error of the PnP corners [px]
+               //   reproj_px       ★ 占位：当前恒为 -1（从未赋值）
                //   gimbal_roll_deg gimbal roll (the CSV previously had yaw/pitch only)
                //   tilt_deg        angle between the face normal and the optical axis
-               //   local_theta_rad 实际喂进局部 tracker 的相位（弦或圆心路径）
-               //   local_chord     1 = 该相位来自"弦相位"（圆心无关）
+               //   local_theta_rad 实际喂进局部 tracker 的相位（橙点角度 / 两片 roll 融合）
+               //   local_chord     该相位来源：0=圆心 1=弦 2=两片 roll 融合
                "ex_m,reproj_px,gimbal_roll_deg,tilt_deg,local_theta_rad,local_chord,"
-               // meas_*_ch：实测板心（车体系，米）—— 新方案（中点轨迹 BA）的原始输入
+               // meas_*_ch：实测板心（车体系，米）；用于真值对比 / 离线验证
                "ma_v,mb_v,ma_x,ma_y,ma_z,mb_x,mb_y,mb_z\n";
     }
   }
@@ -610,11 +610,10 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   I.last_kpt.clear();
   I.have_rcenter = false;
 
-  // ---- 统一的 PnP：两个检测后端共用 ----
+  // ---- 统一的 PnP（当前唯一检测后端 = HW26）----
   // 刻意【不】调用 HW26 的 BuffPnPSolver：它内部写死 consts::BUFF_POINTS = 0.114，
-  // 那是 HW26 实车靶板的尺寸，用在模拟器上会让距离偏大约 10%（实测 10.18%，
-  // 而 0.127 只有 0.18%）。两个模型的上/左/下/右四点指同一批物理点，所以共用一套
-  // 物体点。双解消歧与首帧判据也集中在这一处，不要再写第二份。
+  // 那是实车靶板尺寸，用在本模拟器上 PnP 测距会偏大（用 config 的 0.093 口径实测
+  // ≈6.9~7.0 m，真值 ≈7.07 m）。双解消歧与首帧判据集中在这一处，不要再写第二份。
   const double h_plate = I.cfg.blade_half_size;
   const std::vector<cv::Point3f> obj_plate = {
       {0.f, 0.f, static_cast<float>(h_plate)},
@@ -893,8 +892,8 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   out.n_selected = static_cast<int>(selected.size());
 
   //    刻意不调用 I.solver->solve_pnp()：HW26 的 BuffPnPSolver 内部写死
-  //    consts::BUFF_POINTS = 0.114，那是它实车靶板的尺寸，用在模拟器上会让
-  //    距离偏大约 10%（实测 10.18% vs 0.127 的 0.18%）。
+  //    consts::BUFF_POINTS = 0.114（实车靶板尺寸），本模拟器上测距会偏大；
+  //    这里用 config 的 blade_half_size_hw26（当前 0.093）自建物点。
   {
     std::vector<std::vector<Pose3f>> cand_sets;   // 每个候选的全部 IPPE 解
     std::vector<int> cand_pick;                    // 每个候选的"连续性"选解
@@ -1080,9 +1079,7 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       out.face_tilt_deg =
           std::acos(std::clamp(std::abs(I.n_face.dot(cam_dir)), 0.f, 1.f)) * 180.0 / M_PI;
     }
-    // 6e) 自检：把 PnP 解出的扇叶四角重投影回图像，与检测到的关键点比对。
-    //     误差应 < 1px；若很大说明投影链（轴向/内参）有问题。
-    // 观测系 -> 车体系（meas_* 是观测系里的板心，画图前必须转对）
+    // 6e) 观测系 -> 车体系（meas_* 是观测系里的板心，画图前必须转对）
     auto obs2ch_v = [&](const Eigen::Vector3f &q) -> Eigen::Vector3f {
       if (I.cfg.frame == RefFrame::kFace) return I.R_chassis_face * q;
       if (I.cfg.frame == RefFrame::kChassis) return q;
@@ -1090,8 +1087,9 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
     };
     // 6f-0) 转盘圆心 C
     //
-    // C 是"相位 -> 打击点"的唯一基准：roll = atan2(t.z-C.z, C.y-t.y)，
-    // 预测点 = (C.x, C.y - R cosθ, C.z + R sinθ)。C 错了，一切都跟着错。
+    // C 是"相位 -> 打击点"的基准：roll/θ = atan2(t.z-C.z, C.y-t.y)。
+    // 当前打击点【不是】圆上取点，而是"橙点偏移 orange_rel 绕轴旋转 dθ"（见本文件橙点锚定一节）。
+    // C 错了，相位和锚定都会跟着错。
     //
     // 为什么不能直接用 PnP 朝向反推：HW26 的 R_center = R*(0,0,-0.7) + t 依赖靶板的
     // 【面内朝向】，而 PnP 的朝向由 4 个点 t/l/b/r 恢复 —— 这 4 个点构成【正方形】，

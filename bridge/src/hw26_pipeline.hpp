@@ -100,13 +100,15 @@ struct Config {
   // 打击板四点的半边长（相对扇叶中心），(0,0,±h),(0,±h,0)。
   // 走桥自实现的 PnP，不调用 HW26 的 Solver（它的 BUFF_POINTS=0.114 用在模拟器上
   // 会让距离偏大约 10%）。
-  // blade_half_size 是"四角点"那一批物理点的值（历史/sp25 口径，当前无后端使用）。
+  // blade_half_size 是"四角点"那一批物理点的值（历史口径，当前无后端使用；
+  // 运行时会被本文件下方的 blade_half_size_hw26 覆盖，见 hw26_pipeline.cpp 的 6d)。
   double blade_half_size = 0.127;
   // HW26 后端的 t/l/b/r 是八边形相邻顶点的【中点】，是另一批物理点，半径不同。
-  // 用两片靶标的图像间距反推真值距离得 0.127 * 6.4/9.45 ≈ 0.086，取 0.088。
-  // 实测：用 0.127 时 dis≈9.4 m，用 0.088 时 dis≈6.5 m（真值≈6.4 m）—— 已验证。
+  // ★ 必须与 config/bridge.yaml 的 blade_half_size_hw26 一致（yaml 优先）。
+  // 标定依据（2026-10 复测）：车在 (±5,1,±5) 到符心真值 ≈ 7.07 m；
+  //   0.127 -> PnP 报 ≈9.4 m（偏大约 33%）；0.093 -> PnP 报 ≈6.9~7.0 m，与真值吻合。
   // 注意 reproj 查不出这个尺度错误：平面靶标 PnP 有尺度不可分辨性。
-  double blade_half_size_hw26 = 0.088;
+  double blade_half_size_hw26 = 0.093;
   // 模拟器给的枪口补偿（POWER_RUNE_INTERFACE.md:105）：
   //   枪口相对相机光心，云台系(X前 Y左 Z上)：前 73.83mm、右 1.08mm、下 28.48mm
   bool use_muzzle_offset = true;
@@ -253,7 +255,8 @@ struct Output {
   int blue_px_x = -1, blue_px_y = -1;
   double face_ex = 0.0;       // 面系下径向矢量的出平面分量 |e.x|（应≈0，验证面系成立）
   double face_tilt_deg = 0.0; // 面法向与相机光轴的夹角（视角偏离正对的程度）
-  double reproj_px = -1.0;    // 自检：PnP 四角重投影 vs 检测关键点的最大误差（当前未计算）
+  double reproj_px = -1.0;    // ★ 占位：当前代码从不赋值，CSV 里恒为 -1
+                              //   （早期计划做"PnP 四角重投影 vs 关键点"自检，未实现）
   // 双靶标诊断
   int dual_targets = 0;         // 本帧融入了几个靶标（大符正常 = 2）
   double dual_delta_deg = 0.0;  // 吸附后的相位差 Δ（应为 72 或 144 度）
