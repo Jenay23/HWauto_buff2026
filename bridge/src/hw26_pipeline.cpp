@@ -419,6 +419,10 @@ struct Pipeline::Impl {
   // 可以用来在"中垂线两支解"里选正确的那支。
   Eigen::Vector3f center_face = Eigen::Vector3f::Zero();
   bool have_center = false;
+  // 最近一次"通过位置内点门"的橙点相对圆心的面系偏移。瞄准用它（保持单一约定），
+  // 门外的帧沿用上一次的值，避免"橙点锚定 <-> 圆上取点"来回切造成的大跳。
+  Eigen::Vector3f orange_rel = Eigen::Vector3f::Zero();
+  bool orange_rel_valid = false;
   // center_source=1 时用来解圆心 C 的历史：只存【被选中的那一片】的 t（车体系）。
   // 为什么身份切换不要紧：两片点亮的靶标都落在【同一个半径 0.7 的圆】上，
   // 所以即使帧间"谁被选中"换了，这些点仍在同一个圆上 —— 拟合对身份免疫。
@@ -1308,9 +1312,16 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
         const Eigen::Vector3f p_face = I.R_chassis_face.transpose() * out.meas_a_ch;
         const double rad = std::hypot(static_cast<double>(p_face.y() - I.center_face.y()),
                                       static_cast<double>(p_face.z() - I.center_face.z()));
-        if (std::abs(rad - static_cast<double>(r)) > I.cfg.pos_gate_m) pos_outlier = true;
+        if (std::abs(rad - static_cast<double>(r)) > I.cfg.pos_gate_m) {
+          pos_outlier = true;
+        } else {
+          I.orange_rel = p_face - I.center_face;   // 记录好的橙点偏移
+          I.orange_rel_valid = true;
+        }
       }
-      if (pos_outlier) out.meas_a_valid = false;   // 橙点锚定退回圆上取点
+      // ★ 门外【不】清 meas_a_valid：瞄准约定必须保持单一，否则"橙点锚定 <-> 圆上取点"
+      //   来回切，两约定差一个测量误差 -> 实测 aim 大跳 ~370px。门外只是不喂 tracker，
+      //   瞄准沿用最近一次好偏移（平滑滑行）。
       // 让 绿点 = 橙点的预测 成为恒等式：
       //   以前把 PnP 的 roll 直接喂给局部 tracker，而橙点 meas_a_ch 是 PnP 解出的板心位置，
       //   绿点又是理想圆上按 theta 外推的点 —— 两条不同几何路径，两者会偏几十像素。
@@ -1547,11 +1558,9 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
         //   这样即使圆心/半径与实测有偏差，打击点也始终锚定在橙点自己的轨迹上；
         //   dθ 用模型在两个时刻的相位差，与叶片身份无关（两片共享同一旋转）。
         double roll_now = 0.0;
-        if (out.meas_a_valid && I.local_trk.predict(t_rel, &roll_now)) {
+        if (I.orange_rel_valid && I.local_trk.predict(t_rel, &roll_now)) {
           const double dtheta = wrap_pi(roll_pred - roll_now);
-          const Eigen::Vector3f p_face =
-              I.R_chassis_face.transpose() * out.meas_a_ch;   // 车体系 -> 面系
-          const Eigen::Vector3f rel = p_face - I.center_face;
+          const Eigen::Vector3f rel = I.orange_rel;   // 最近一次好橙点偏移（单一约定）
           const double c = std::cos(dtheta), s = std::sin(dtheta);
           Eigen::Vector3f rel2;
           rel2.x() = rel.x();
