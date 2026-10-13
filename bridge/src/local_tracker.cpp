@@ -55,6 +55,7 @@ void LocalRuneTracker::reset() {
   drop_run_ = 0;
   locked_ = free_locked_ = 0;
   phys_valid_ = 0;
+  sector_off_ = 0.0;
   ar_c_.clear();
   ekf_init_ = 0;
   ekf_rej_ = ekf_tot_ = ekf_miss_ = 0;
@@ -460,6 +461,31 @@ void LocalRuneTracker::push(double t, double roll) {
       snap_t_ = t_ref_;
       have_snapshot_ = true;
     }
+  }
+  // ★★ 扇区重参考（RP-26Rune resolve_track_after_phase_jump 的移植）★★
+  //   换片/换组时观测相位整体平移 k·(2π/5)（5 个扇区）。与其丢帧/重置，不如给观测
+  //   加一个常量偏移 sector_off_，把新扇区折回原参考系：相位连续、窗口不清空、
+  //   跨"命中换组"也不断（这正是我们之前 reset 掉窗口的原因）。
+  if (mode_ == 7) {
+    if (phys_valid_ && static_cast<int>(h_.size()) >= 20 && last_data_t_ > 0.0) {
+      const double pred = physEval(t);
+      const double sector = 2.0 * kPi / 5.0;
+      const double base_res = std::abs(wrapPi(roll - sector_off_ - pred));
+      if (base_res > phys_gate_rad_) {
+        double best_res = base_res;
+        int best_k = 0;
+        for (int k = -2; k <= 2; ++k) {
+          if (k == 0) continue;
+          const double r = std::abs(wrapPi(roll - (sector_off_ + k * sector) - pred));
+          if (r < best_res) { best_res = r; best_k = k; }
+        }
+        if (best_k != 0 && best_res < phys_gate_rad_) {
+          sector_off_ += best_k * sector;   // 折回原参考系（不丢帧）
+          ++sector_switch_;
+        }
+      }
+    }
+    roll = wrapPi(roll - sector_off_);
   }
   // 跳变卫兵（改）：原来一遇跳变就 reset() 清空【整个窗口】，
   // 代价约 0.4~0.5 s（要重新攒够 min_n/span），而实测跳变每几帧就来一次 ->

@@ -52,6 +52,7 @@ class LocalRuneTracker {
   double span_deg() const { return span_deg_; }
   int ekf_rej() const { return ekf_rej_; }
   int phys_rej() const { return phys_rej_; }
+  int sector_switch() const { return sector_switch_; }
   void set_phys_gate_rad(double g) { phys_gate_rad_ = g; }
   int jump_dropped() const { return jump_dropped_; }
   bool lost() const { return lost_; }
@@ -174,6 +175,11 @@ class LocalRuneTracker {
   double phys_sgn_ = 1.0;
   int phys_rej_ = 0;        // 被"模型锚定创新门"拒绝的帧数（累计）
   int phys_rej_run_ = 0;    // 连续被拒帧数
+  // 扇区重参考（移植自 RP-26Rune resolve_track_after_phase_jump）：观测换片/换组时
+  // 相位整体平移 k*(2pi/5)。不丢帧/不重置，而是给观测量加常量偏移 sector_off_，
+  // 把新扇区折回原参考系 -> 相位保持连续、窗口不被清空、跨"命中换组"也不断。
+  double sector_off_ = 0.0;
+  int sector_switch_ = 0;
   double phys_gate_rad_ = 0.50;   // 创新门：|测量 - 模型预测| 上限（≈29°）
 
   // free
