@@ -61,6 +61,7 @@ struct BridgeConfig {
   std::string image_topic = "rt/image_raw";
   std::string pose_topic = "rt/gimbal_pose";
   std::string cmd_topic = "cmd/gimbal";
+  std::string rune_kpts_topic = "rt/rune_kpts";   // 模拟器真值 8 点（只读订阅）
   double max_image_age_ms = 300.0;  // 超过则不发控制（保持云台）
 };
 
@@ -527,6 +528,26 @@ std::atomic<uint64_t> g_img_count{0};
 std::atomic<uint64_t> g_dropped{0};
 std::string g_capture_path;
 
+// ---- rt/rune_kpts：模拟器发布的"每个靶标 8 个真值点"（JSON），只留最新一帧写日志用 ----
+std::mutex g_kpts_mu;
+std::string g_kpts_json;
+std::atomic<uint64_t> g_kpts_count{0};
+std::ofstream g_kpts_log;
+
+void on_rune_kpts(struct z_loaned_sample_t *sample, void *) {
+  const struct z_loaned_bytes_t *pl = z_sample_payload(sample);
+  struct z_owned_slice_t owned;
+  if (z_bytes_to_slice(pl, &owned) != Z_OK) return;
+  const char *d = reinterpret_cast<const char *>(z_slice_data(z_loan(owned)));
+  const size_t n = z_slice_len(z_loan(owned));
+  {
+    std::lock_guard<std::mutex> lk(g_kpts_mu);
+    g_kpts_json.assign(d, n);
+    g_kpts_count++;
+  }
+  z_drop(z_move(owned));
+}
+
 void on_pose(struct z_loaned_sample_t *sample, void *) {
   const struct z_loaned_bytes_t *pl = z_sample_payload(sample);
   struct z_owned_slice_t owned;
@@ -940,15 +961,17 @@ int main(int argc, char **argv) {
     return 5;
   }
 
-  z_owned_closure_sample_t cb_pose, cb_img;
+  z_owned_closure_sample_t cb_pose, cb_img, cb_kpts;
   z_closure_sample(&cb_pose, on_pose, NULL, NULL);
   z_closure_sample(&cb_img, on_image, NULL, NULL);
-  z_view_keyexpr_t ke_pose, ke_img, ke_cmd;
+  z_closure_sample(&cb_kpts, on_rune_kpts, NULL, NULL);
+  z_view_keyexpr_t ke_pose, ke_img, ke_cmd, ke_kpts;
   z_view_keyexpr_from_str(&ke_pose, bc.pose_topic.c_str());
   z_view_keyexpr_from_str(&ke_img, bc.image_topic.c_str());
   z_view_keyexpr_from_str(&ke_cmd, bc.cmd_topic.c_str());
+  z_view_keyexpr_from_str(&ke_kpts, bc.rune_kpts_topic.c_str());
 
-  z_owned_subscriber_t sub_pose, sub_img;
+  z_owned_subscriber_t sub_pose, sub_img, sub_kpts;
   z_owned_publisher_t pub;
   if (z_declare_subscriber(z_loan(s_pose), &sub_pose, z_loan(ke_pose), z_move(cb_pose), NULL) !=
       Z_OK) {
@@ -958,6 +981,11 @@ int main(int argc, char **argv) {
   if (z_declare_subscriber(z_loan(s_img), &sub_img, z_loan(ke_img), z_move(cb_img), NULL) != Z_OK) {
     std::cerr << "[bridge] subscribe image failed" << std::endl;
     return 7;
+  }
+  if (z_declare_subscriber(z_loan(s_img), &sub_kpts, z_loan(ke_kpts), z_move(cb_kpts),
+                           NULL) != Z_OK) {
+    // 不致命：模拟器还没发这个 topic 时只是没有真值日志
+    std::cerr << "[bridge] subscribe rune_kpts failed (真值日志将为空)" << std::endl;
   }
   if (z_declare_publisher(z_loan(s_img), &pub, z_loan(ke_cmd), NULL) != Z_OK) {
     std::cerr << "[bridge] declare publisher failed" << std::endl;
@@ -970,6 +998,8 @@ int main(int argc, char **argv) {
   std::thread worker([&] {
     std::vector<uint8_t> buf;
     int64_t stamp = 0;
+    // 真值日志：每处理一帧写一行 "图片时间戳纳秒,<rt/rune_kpts JSON>"
+    g_kpts_log.open("hw26_rune_kpts_log.jsonl", std::ios::trunc);
     while (!g_stop.load()) {
       if (!g_frame.take(&buf, &stamp)) continue;
       GimbalPose pose;
@@ -988,6 +1018,15 @@ int main(int argc, char **argv) {
 
       auto out = pipe->process(f.rgb, static_cast<int>(f.w), static_cast<int>(f.h),
                                f.timestamp_ns, pose.yaw, pose.pitch, pose.roll);
+
+      if (g_kpts_log.is_open()) {
+        std::string kj;
+        {
+          std::lock_guard<std::mutex> lk(g_kpts_mu);
+          kj = g_kpts_json;
+        }
+        if (!kj.empty()) g_kpts_log << f.timestamp_ns << ',' << kj << '\n';
+      }
 
       const bool control = fresh && out.control;
       const bool fire = bc.algo.fire_enabled && control && out.fire;
