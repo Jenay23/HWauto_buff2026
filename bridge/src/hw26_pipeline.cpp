@@ -519,7 +519,9 @@ Pipeline::Pipeline(const Config &cfg) : impl_(new Impl(cfg)) {
                //   tilt_deg        angle between the face normal and the optical axis
                //   local_theta_rad 实际喂进局部 tracker 的相位（弦或圆心路径）
                //   local_chord     1 = 该相位来自"弦相位"（圆心无关）
-               "ex_m,reproj_px,gimbal_roll_deg,tilt_deg,local_theta_rad,local_chord\n";
+               "ex_m,reproj_px,gimbal_roll_deg,tilt_deg,local_theta_rad,local_chord,"
+               // meas_*_ch：实测板心（车体系，米）—— 新方案（中点轨迹 BA）的原始输入
+               "ma_v,mb_v,ma_x,ma_y,ma_z,mb_x,mb_y,mb_z\n";
     }
   }
 }
@@ -1814,7 +1816,10 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
             << ',' << (out.fire ? 1 : 0) << ','
             << out.face_ex << ',' << out.reproj_px << ','
             << gimbal_roll * 180.0 / M_PI << ',' << out.face_tilt_deg << ','
-            << out.local_theta << ',' << out.local_chord << '\n';
+            << out.local_theta << ',' << out.local_chord << ','
+            << (out.meas_a_valid ? 1 : 0) << ',' << (out.meas_b_valid ? 1 : 0) << ','
+            << out.meas_a_ch.x() << ',' << out.meas_a_ch.y() << ',' << out.meas_a_ch.z() << ','
+            << out.meas_b_ch.x() << ',' << out.meas_b_ch.y() << ',' << out.meas_b_ch.z() << '\n';
       I.log.flush();
     }
   }
