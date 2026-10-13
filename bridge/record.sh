@@ -15,6 +15,11 @@ tag="${2:-run}"
 stamp="$(date +%Y%m%d_%H%M%S)"
 out="logs/${stamp}_${tag}.log"
 mkdir -p logs
+kpts="${out%.log}.kpts.jsonl"
 echo "[record] -> $out"
-./build/hw26_sim_bridge --config config/bridge.yaml "${1:---no-fire}" 2>&1 | tee "$out"
+echo "[record] -> $kpts   (真值8点 vs 模型18点，每帧一行)"
+# 桥通过环境变量决定真值日志路径 -> 和本次 log 同名同标签，自动保存、不覆盖历史
+HW26_KPTS_LOG="$kpts" ./build/hw26_sim_bridge --config config/bridge.yaml "${1:---no-fire}" 2>&1 | tee "$out"
 echo "[record] saved: $out ($(wc -l < "$out") lines)"
+echo "[record] 真值日志: $kpts ($(wc -l < "$kpts" 2>/dev/null || echo 0) lines)"
+echo "[record] 对比: python3 tools/kpts_compare.py $kpts"

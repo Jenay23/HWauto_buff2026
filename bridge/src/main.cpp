@@ -22,6 +22,7 @@
 #include <iostream>
 #include <mutex>
 #include <random>
+#include <cstdlib>
 #include <ctime>
 #include <string>
 #include <thread>
@@ -1002,14 +1003,23 @@ int main(int argc, char **argv) {
     // 真值日志：每处理一帧写一行 "图片时间戳纳秒,{sim,model}"。
     // 每次运行一个独立文件名（带启动时刻），否则多次跑会互相覆盖。
     {
-      std::time_t t_now = std::time(nullptr);
-      std::tm tm_buf{};
-      localtime_r(&t_now, &tm_buf);
-      char name_buf[64];
-      std::strftime(name_buf, sizeof(name_buf), "hw26_rune_kpts_%Y%m%d_%H%M%S.jsonl",
-                    &tm_buf);
-      g_kpts_log.open(name_buf, std::ios::trunc);
-      std::cout << "[bridge] rune-kpts log -> " << name_buf << std::endl;
+      // record.sh 会用 HW26_KPTS_LOG 指定与本次 log 同名同标签的路径；
+      // 直接手跑没设时，退回带时间戳的默认名（也不会覆盖历史）。
+      const char *env_kpts = std::getenv("HW26_KPTS_LOG");
+      std::string kname;
+      if (env_kpts != nullptr && *env_kpts != '\0') {
+        kname = env_kpts;
+      } else {
+        std::time_t t_now = std::time(nullptr);
+        std::tm tm_buf{};
+        localtime_r(&t_now, &tm_buf);
+        char name_buf[64];
+        std::strftime(name_buf, sizeof(name_buf), "hw26_rune_kpts_%Y%m%d_%H%M%S.jsonl",
+                      &tm_buf);
+        kname = name_buf;
+      }
+      g_kpts_log.open(kname, std::ios::trunc);
+      std::cout << "[bridge] rune-kpts log -> " << kname << std::endl;
     }
     while (!g_stop.load()) {
       if (!g_frame.take(&buf, &stamp)) continue;
