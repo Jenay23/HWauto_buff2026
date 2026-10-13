@@ -810,15 +810,28 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
         continue;
       pass.push_back(i);
     }
-    // 大符最多高亮 2 片，多于 2 个时按置信度取前 2（第 3 个通常是假阳）
-    if (pass.size() > 2) {
-      std::partial_sort(pass.begin(), pass.begin() + 2, pass.end(),
-                        [&](std::size_t x, std::size_t y) {
-                          return dets[x].confidence > dets[y].confidence;
-                        });
-      pass.resize(2);
+    // ① 先置信度：降序
+    std::sort(pass.begin(), pass.end(), [&](std::size_t x, std::size_t y) {
+      return dets[x].confidence > dets[y].confidence;
+    });
+    // ② 去重：一个靶标常被检出多份（实测 n_det 常为 4~5，而大符只有 2 片点亮）。
+    //    图像中心靠得很近的视为同一片，只留置信度最高的那一份。
+    //    阈值 60px：两片真实靶标间距 ~220px（0.82m @6.5m），不会误合并。
+    std::vector<std::size_t> uniq;
+    for (std::size_t idx : pass) {
+      const auto &b = dets[idx];
+      const Eigen::Vector2f c = 0.25f * (b.t + b.l + b.b + b.r);
+      bool dup = false;
+      for (std::size_t u : uniq) {
+        const auto &bu = dets[u];
+        const Eigen::Vector2f cu = 0.25f * (bu.t + bu.l + bu.b + bu.r);
+        if ((c - cu).norm() < 60.0f) { dup = true; break; }
+      }
+      if (!dup) uniq.push_back(idx);
     }
-    for (std::size_t i : pass) {
+    // ③ 最多留 4 个候选，交给"刚性选一对"（超过 4 个后置信度低的多半是假阳）
+    if (uniq.size() > 4) uniq.resize(4);
+    for (std::size_t i : uniq) {
       selected.push_back(dets[i]);
       selected_src.push_back(i);
     }
@@ -872,68 +885,95 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   //    consts::BUFF_POINTS = 0.114，那是它实车靶板的尺寸，用在模拟器上会让
   //    距离偏大约 10%（实测 10.18% vs 0.127 的 0.18%）。
   {
-    int picks[2] = {-1, -1};
-    int pi = 0;
-    std::vector<std::vector<Pose3f>> cand_sets;   // 与 poses 平行（只含 PnP 成功的）
+    std::vector<std::vector<Pose3f>> cand_sets;   // 每个候选的全部 IPPE 解
+    std::vector<int> cand_pick;                    // 每个候选的"连续性"选解
+    std::vector<int> cand_src;                     // 来源下标
+    std::vector<double> cand_conf;                 // 置信度
     for (std::size_t si = 0; si < selected.size(); ++si) {
-    const auto &b = selected[si];
+      const auto &b = selected[si];
       int pk = -1;
       std::vector<Pose3f> cands;
-      if (const auto pose =
-              solve_pose_ippe(cv::Point2f(b.t.x(), b.t.y()), cv::Point2f(b.l.x(), b.l.y()),
-                              cv::Point2f(b.b.x(), b.b.y()), cv::Point2f(b.r.x(), b.r.y()), &pk,
-                              &cands)) {
-        poses.push_back(*pose);
+      if (solve_pose_ippe(cv::Point2f(b.t.x(), b.t.y()), cv::Point2f(b.l.x(), b.l.y()),
+                          cv::Point2f(b.b.x(), b.b.y()), cv::Point2f(b.r.x(), b.r.y()), &pk,
+                          &cands)) {
         cand_sets.push_back(std::move(cands));
-        // ★ 与 poses 同步记录：只有 PnP 成功的才 push，两边永远一一对应
-        pose_src.push_back(selected_src.size() > si ? selected_src[si] : si);
-        if (pi < 2) picks[pi++] = pk;
+        cand_pick.push_back(pk);
+        cand_src.push_back(selected_src.size() > si ? selected_src[si] : si);
+        cand_conf.push_back(static_cast<double>(b.confidence));
       }
     }
-    for (int i = 0; i < 2; ++i) out.sol_pick_t[i] = picks[i];
+    out.sol_pick_t[0] = cand_pick.size() > 0 ? cand_pick[0] : -1;
+    out.sol_pick_t[1] = cand_pick.size() > 1 ? cand_pick[1] : -1;
 
-    // ★★ 两片联合消歧（IPPE 双解的正确打开方式）★★
-    //   两个靶标刚性固连在同一转盘上，因此正确的那对 IPPE 解必须同时满足：
-    //     ① 面内弦长落在相邻槽位 {0.823, 1.331} m 之一；
-    //     ② 两片共面（沿符面法向的坐标相同）。
-    //   法向 n 用【上一帧平滑后的符面法向】（符静止 -> 它是常量，与本次选择无关，
-    //   所以不存在"用被选解反过来定义平面"的循环依赖）。
-    //   这是逐帧、无历史依赖的离散选择：4 个组合里只有一个是物理自洽的，
-    //   从根上掐掉 IPPE 翻转造成的相位跳变（实测 rcd 可达 0.89 m、dres 达 35°）。
-    if (I.cfg.dual_target && I.face_ready && cand_sets.size() >= 2 && poses.size() >= 2 &&
-        !cand_sets[0].empty() && !cand_sets[1].empty()) {
+    // ★★ 先置信度、再刚性：在（已按置信度排序并去重的）候选里，选几何自洽的一对 ★★
+    //   候选已经按置信度降序排列；这里对所有配对 × 所有 IPPE 解组合，取
+    //     cost = |面内弦长 - 最近槽位| + 0.5·|两片面外差| + 0.5·(| |t-C|-R | 之和)
+    //            - 0.08·(conf_i + conf_j)
+    //   最小的那一对。几何权重远大于置信度项，所以是"先候选按置信度筛，再按刚性定"。
+    if (I.cfg.dual_target && I.face_ready && cand_sets.size() >= 2) {
       const Eigen::Vector3f n = I.n_face;
       const double R = static_cast<double>(buff_algo::consts::BUFF_RADIUS);
       const double slots[2] = {2.0 * R * std::sin(0.5 * 2.0 * M_PI / 5.0),
                                2.0 * R * std::sin(1.0 * 2.0 * M_PI / 5.0)};
+      const Eigen::Vector3f Cch = I.R_chassis_face * I.center_face;
       double best = 1e18;
-      int b0 = -1, b1 = -1;
-      for (std::size_t i = 0; i < cand_sets[0].size(); ++i) {
-        for (std::size_t j = 0; j < cand_sets[1].size(); ++j) {
-          const Eigen::Vector3f t0 = R_cg * cand_sets[0][i].translation;
-          const Eigen::Vector3f t1 = R_cg * cand_sets[1][j].translation;
-          const double o0 = t0.dot(n), o1 = t1.dot(n);
-          const Eigen::Vector3f a = t0 - static_cast<float>(o0) * n;
-          const Eigen::Vector3f bq = t1 - static_cast<float>(o1) * n;
-          const double d = (a - bq).norm();
-          const double ds = std::min(std::abs(d - slots[0]), std::abs(d - slots[1]));
-          const double cost = ds + 0.5 * std::abs(o0 - o1);
-          if (cost < best) { best = cost; b0 = static_cast<int>(i); b1 = static_cast<int>(j); }
+      int bi = -1, bj = -1, bc0 = -1, bc1 = -1;
+      for (std::size_t i = 0; i + 1 < cand_sets.size(); ++i) {
+        for (std::size_t j = i + 1; j < cand_sets.size(); ++j) {
+          for (std::size_t c0 = 0; c0 < cand_sets[i].size(); ++c0) {
+            for (std::size_t c1 = 0; c1 < cand_sets[j].size(); ++c1) {
+              const Eigen::Vector3f t0 = R_cg * cand_sets[i][c0].translation;
+              const Eigen::Vector3f t1 = R_cg * cand_sets[j][c1].translation;
+              const double o0 = t0.dot(n), o1 = t1.dot(n);
+              const Eigen::Vector3f a = t0 - static_cast<float>(o0) * n;
+              const Eigen::Vector3f bq = t1 - static_cast<float>(o1) * n;
+              const double d = (a - bq).norm();
+              const double ds = std::min(std::abs(d - slots[0]), std::abs(d - slots[1]));
+              double cs = 0.0;
+              if (I.have_center) {
+                cs = 0.5 * (std::abs((t0 - Cch).norm() - R) +
+                            std::abs((t1 - Cch).norm() - R));
+              }
+              const double cost = ds + 0.5 * std::abs(o0 - o1) + cs -
+                                  0.08 * (cand_conf[i] + cand_conf[j]);
+              if (cost < best) {
+                best = cost;
+                bi = static_cast<int>(i); bj = static_cast<int>(j);
+                bc0 = static_cast<int>(c0); bc1 = static_cast<int>(c1);
+              }
+            }
+          }
         }
       }
-      if (b0 >= 0 && b1 >= 0) {
-        const Eigen::Vector3f t0 = R_cg * cand_sets[0][b0].translation;
-        const Eigen::Vector3f t1 = R_cg * cand_sets[1][b1].translation;
+      if (bi >= 0) {
+        const Eigen::Vector3f t0 = R_cg * cand_sets[bi][bc0].translation;
+        const Eigen::Vector3f t1 = R_cg * cand_sets[bj][bc1].translation;
         const double o0 = t0.dot(n), o1 = t1.dot(n);
         const double d = ((t0 - static_cast<float>(o0) * n) -
                           (t1 - static_cast<float>(o1) * n)).norm();
         const double ds = std::min(std::abs(d - slots[0]), std::abs(d - slots[1]));
-        if (ds < 0.12 && std::abs(o0 - o1) < 0.20) {   // 自洽才采纳
-          poses[0] = cand_sets[0][b0];
-          poses[1] = cand_sets[1][b1];
-          out.sol_pick_t[0] = b0;
-          out.sol_pick_t[1] = b1;
+        if (ds < 0.15 && std::abs(o0 - o1) < 0.25) {   // 刚性自洽才采纳
+          poses.clear();
+          pose_src.clear();
+          poses.push_back(cand_sets[bi][bc0]);
+          poses.push_back(cand_sets[bj][bc1]);
+          pose_src.push_back(cand_src[bi]);
+          pose_src.push_back(cand_src[bj]);
+          out.sol_pick_t[0] = bc0;
+          out.sol_pick_t[1] = bc1;
         }
+      }
+    }
+    // 兜底：没有刚性自洽配对时，仍按置信度顺序用每个候选自己的连续性解，保留前 2
+    if (poses.size() < 2) {
+      poses.clear();
+      pose_src.clear();
+      const std::size_t keep = std::min<std::size_t>(2, cand_sets.size());
+      for (std::size_t k = 0; k < keep; ++k) {
+        const int pk = std::max(0, std::min(static_cast<int>(cand_sets[k].size()) - 1,
+                                           cand_pick[k]));
+        poses.push_back(cand_sets[k][pk]);
+        pose_src.push_back(cand_src[k]);
       }
     }
   }
