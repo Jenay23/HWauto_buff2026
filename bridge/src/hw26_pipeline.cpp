@@ -1484,9 +1484,28 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
           break;
         }
         const float R = buff_algo::consts::BUFF_RADIUS;
-        aim_pt.x() = I.center_face.x();
-        aim_pt.y() = I.center_face.y() - R * std::cos(static_cast<float>(roll_pred));
-        aim_pt.z() = I.center_face.z() + R * std::sin(static_cast<float>(roll_pred));
+        // ★ 打击点 = 【实测橙点】的预测，而不是模型圆上另取的点。
+        //   做法：把实测板心 meas_a_ch（面系）绕旋转轴【旋转模型预测的相位增量】dθ。
+        //   这样即使圆心/半径与实测有偏差，打击点也始终锚定在橙点自己的轨迹上；
+        //   dθ 用模型在两个时刻的相位差，与叶片身份无关（两片共享同一旋转）。
+        double roll_now = 0.0;
+        if (out.meas_a_valid && I.local_trk.predict(t_rel, &roll_now)) {
+          const double dtheta = wrap_pi(roll_pred - roll_now);
+          const Eigen::Vector3f p_face =
+              I.R_chassis_face.transpose() * out.meas_a_ch;   // 车体系 -> 面系
+          const Eigen::Vector3f rel = p_face - I.center_face;
+          const double c = std::cos(dtheta), s = std::sin(dtheta);
+          Eigen::Vector3f rel2;
+          rel2.x() = rel.x();
+          rel2.y() = static_cast<float>(rel.y() * c + rel.z() * s);
+          rel2.z() = static_cast<float>(rel.z() * c - rel.y() * s);
+          aim_pt = I.center_face + rel2;
+        } else {
+          // 灭灯滑行（没有实测橙点）才退回"圆上取点"
+          aim_pt.x() = I.center_face.x();
+          aim_pt.y() = I.center_face.y() - R * std::cos(static_cast<float>(roll_pred));
+          aim_pt.z() = I.center_face.z() + R * std::sin(static_cast<float>(roll_pred));
+        }
       } else if (out.status == static_cast<int>(StatusType::TRACKING)) {
         // 仅当没开 local_only 且本地不可用时才回退（会转圈的旧路径）
         aim_pt = I.predictor->predict_position(static_cast<float>(lead));
