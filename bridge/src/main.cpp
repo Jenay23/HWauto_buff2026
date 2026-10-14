@@ -1119,16 +1119,25 @@ int main(int argc, char **argv) {
         std::fflush(stdout);
       }
       const uint64_t k = ++processed;
+      // ★ 实时帧率：最近 30 帧的【墙钟】(不是图像时间戳)平均 -> 反映真实处理速度
+      static std::vector<int64_t> fps_t;
+      fps_t.push_back(now_ns);
+      if (fps_t.size() > 31) fps_t.erase(fps_t.begin());
+      double fps_now = 0.0;
+      if (fps_t.size() >= 11) {
+        const double dts = static_cast<double>(fps_t.back() - fps_t.front()) / 1e9;
+        if (dts > 1e-6) fps_now = (static_cast<double>(fps_t.size()) - 1.0) / dts;
+      }
       if (fire || k % static_cast<uint64_t>(std::max(1, bc.algo.console_every)) == 0) {
         std::printf(
             "[bridge] #%llu age=%.0fms det=%d sel=%d solved=%d q=%d st=%d dis=%.2f "
             "roll=%.3f w=%.3f lead=%.3f lat=%.1fms cmd=(%.2f,%.2f) err=%.4f ctrl=%d fire=%d "
-            "nt=%d dlt=%.0f rc=%.2f\n",
+            "nt=%d dlt=%.0f rc=%.2f fps=%.1f\n",
             static_cast<unsigned long long>(k), age_ms, out.n_det, out.n_selected,
             out.solved ? 1 : 0, out.quality ? 1 : 0, out.status, out.buff_dis, out.roll,
             out.roll_velocity, out.lead_s, out.latency_ms, yaw * 180 / M_PI, pitch * 180 / M_PI,
             out.fire_err, control ? 1 : 0, fire ? 1 : 0, out.dual_targets, out.dual_delta_deg,
-            out.rc_dist_m);
+            out.rc_dist_m, fps_now);
         std::fflush(stdout);
       }
       // 组号/身份诊断：每帧一行（有检出时）。判定方法：

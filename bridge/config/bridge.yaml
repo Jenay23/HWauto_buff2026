@@ -214,7 +214,11 @@ cmd_smooth_alpha: 0.5
 max_aim_step_px: 400.0
 stale_ms: 200.0
 
-visualize: 1
+# ★ 实验分支 bridge/fps：强制关可视化，量化"帧率能提到多少"。
+#   原因：visualize=1 时每帧都要 1) 构建 1440x1080 调试图 2) imshow + waitKey(1)，
+#   推理本身 p50 只有 23 ms，而实际帧率只有 25 Hz -> 可视化极可能是主瓶颈。
+#   代价：看不到紫点/绿点面板。测完切回 bridge/gt-kpts 即恢复。
+visualize: 0
 # Log every frame (not every 30th) so the CSV can be joined 1:1 with the
 # telemetry recorder's one-row-per-image-frame CSV on sim_t_ns.
 visualize_every: 1             # 显示节流：1=每帧都显示（面板 60Hz 时不要调大 ✗，否则画面掉到 1/N）
