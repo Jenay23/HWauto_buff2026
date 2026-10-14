@@ -52,8 +52,10 @@ class LocalRuneTracker {
   double span_deg() const { return span_deg_; }
   int ekf_rej() const { return ekf_rej_; }
   int phys_rej() const { return phys_rej_; }
+  int phys_heal() const { return phys_heal_; }   // ★ 坏窗自愈触发次数（累计）
   int sector_switch() const { return sector_switch_; }
   void set_phys_gate_rad(double g) { phys_gate_rad_ = g; }
+  void set_bad_rms_deg(double d) { bad_rms_deg_ = d; }
   int jump_dropped() const { return jump_dropped_; }
   bool lost() const { return lost_; }
   bool hit_confirmed() const { return hit_confirmed_; }   // 连续 >=hit_s_ 有靶标 -> 视为命中
@@ -174,6 +176,7 @@ class LocalRuneTracker {
   double phys_th0_ = 0.0, phys_a_ = 0.9, phys_w_ = 1.94, phys_phi_ = 0.0;
   double phys_sgn_ = 1.0;
   int phys_rej_ = 0;        // 被"模型锚定创新门"拒绝的帧数（累计）
+  int phys_heal_ = 0;       // ★ 坏窗自愈触发次数（拟合 rms 超 bad_rms_deg_ 的次数，累计）
   int phys_rej_run_ = 0;    // 连续被拒帧数
   // 扇区重参考（移植自 RP-26Rune resolve_track_after_phase_jump）：观测换片/换组时
   // 相位整体平移 k*(2pi/5)。不丢帧/不重置，而是给观测量加常量偏移 sector_off_，
@@ -181,6 +184,12 @@ class LocalRuneTracker {
   double sector_off_ = 0.0;
   int sector_switch_ = 0;
   double phys_gate_rad_ = 0.50;   // 创新门：|测量 - 模型预测| 上限（≈29°）
+  // ★ 坏窗自愈（bridge/badwin 实验）：拟合稳健 rms 超过它就认为模型"发疯"
+  //   （实测坏窗 om 撞 1.884 / A 撞 1.045、rms 达 200°+；好窗只有 0.5~8°）。
+  //   处理：模型判无效（于是创新门失效，干净新样本能进窗）+ 只留最近 reboot_keep_ 个
+  //   样本重新自举。原来不处理的话，烂模型会把干净样本全拒掉，要等 15 次连续拒绝才 reset。
+  double bad_rms_deg_ = 30.0;
+  int reboot_keep_ = 10;
 
   // free
   int free_locked_ = 0;

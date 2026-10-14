@@ -154,6 +154,10 @@ struct Config {
   // （默认 6 个，约 0.2~0.3 s）就能给出预测命中点。HW26 到 TRACKING 后仍优先用它。
   int local_tracker = 1;
   double local_rms_gate_deg = 2.5;  // 局部估计器的 rms 门（含重锁门）；调大可让脏数据也出预测
+  // ★ 坏窗自愈门（bridge/badwin 实验）：mode7 拟合 rms 超过它就判模型"发疯"
+  //   -> 失效创新门（让干净新样本能进窗）+ 只留最近 10 个样本重新自举。
+  //   好窗 0.5~8°，坏窗 50~230°，所以 30 是安全分界。
+  double local_bad_rms_deg = 30.0;
   double local_coast_s = 0.2;       // 灭灯多久之内允许滑行；超过就清空参数（真灭灯）
   int local_model = 0;   // 0=csine 1=AR 2=EKF 3=free 4=AR+包络 5=裸AR 6=查表+滑行
 
@@ -310,6 +314,7 @@ struct Output {
   double local_theta = 0.0;  // 本帧实际喂进局部 tracker 的相位（rad）
   int local_chord = 0;       // 2=两片roll融合/roll约定 1=弦相位 0=圆心路径
   int local_phys_rej = 0;    // mode 7 被"模型锚定创新门"拒绝的帧数（累计）
+  int local_phys_heal = 0;   // ★ 坏窗自愈触发次数（累计）
   // ---- 可视化用（全部在【车体系】，方便直接喂 project_px）----
   // 关键：两片的实测板心要【分开】留着，否则看不出是哪一片坏了/被平均了
   bool meas_a_valid = false;

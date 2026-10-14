@@ -134,6 +134,8 @@ local_tracker: 1
 local_model: 7
 local_rms_gate_deg: 15  # 0/1/3 以及 mode 7 都用；好窗 rms 0.5~8°，自转坏窗 139~286°
                         # -> 15° 门把"自转解"挡在 ready() 之外（紫点不再转圈）
+local_bad_rms_deg: 30   # ★ 坏窗自愈（bridge/badwin）：rms 超过就判模型发疯 ->
+                        # 失效创新门（让干净新样本进窗）+ 只留最近 10 个样本重自举
 local_coast_s: 0.2      # 只对 mode 6 有效（灭灯滑行）；mode 7 短暂掉检<0.35s 保留窗口
 
 # ---- 转盘圆心 C 的来源 ----

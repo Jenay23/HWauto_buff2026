@@ -312,6 +312,18 @@ void LocalRuneTracker::physFit() {
     }
     rms_deg_ = std::sqrt(se / n) * 180.0 / kPi;
   }
+  // ★ 坏窗自愈（bridge/badwin 实验）：拟合"发疯"时（om/A 撞边界，rms 实测 200°+）：
+  //   ① 模型判无效 —— 关键是让【创新门失效】。否则这个烂模型会把干净的新样本
+  //      全部拒绝（phys_rej_run_ 攒到 15 才 reset，实测要 ~90 帧），窗口永远恢复不了；
+  //   ② 只保留最近 reboot_keep_ 个样本，下一帧就能从干净样本重新自举（实测 2~3 帧）。
+  //   好窗 rms 只有 0.5~8°，所以 30° 这个门不会误伤。
+  if (rms_deg_ > bad_rms_deg_) {
+    ++phys_heal_;
+    phys_valid_ = 0;
+    locked_ = 0;
+    while (static_cast<int>(h_.size()) > reboot_keep_) h_.pop_front();
+    return;
+  }
   // 瞬时速度/加速度
   phys_sgn_ = sgn;
   const double t = h_.back().t;

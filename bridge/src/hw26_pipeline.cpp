@@ -507,6 +507,7 @@ Pipeline::Pipeline(const Config &cfg) : impl_(new Impl(cfg)) {
   // ★ 关键：local_model 必须【真正】作用到 local_trk，否则它一直用默认 mode 0
   I.local_trk.set_mode(cfg.local_model);
   I.local_trk.set_rms_gates(cfg.local_rms_gate_deg);
+  I.local_trk.set_bad_rms_deg(cfg.local_bad_rms_deg);   // ★ 坏窗自愈门
   I.local_trk.set_coast_s(cfg.local_coast_s);
   I.predictor = std::make_unique<buff_algo::BuffPredictor>(I.tracker_fs["buff_tracker"]);
 
@@ -1402,6 +1403,7 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
         if (std::hypot(dy, dz) > 1e-3) theta_feed = std::atan2(dz, dy);
       }
       out.local_phys_rej = I.local_trk.phys_rej();
+      out.local_phys_heal = I.local_trk.phys_heal();
       if (!pos_outlier) {   // 野值帧不喂、也不更新连续性参考
         I.last_local_theta = theta_feed;
         I.have_last_local_theta = true;
