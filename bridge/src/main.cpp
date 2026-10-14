@@ -64,6 +64,7 @@ struct BridgeConfig {
   std::string pose_topic = "rt/gimbal_pose";
   std::string cmd_topic = "cmd/gimbal";
   std::string rune_kpts_topic = "rt/rune_kpts";   // 模拟器真值 8 点（只读订阅）
+  std::string rune_stat_topic = "rt/stat";        // 模拟器命中统计 {launch,accurate,pct}（只读）
   double max_image_age_ms = 300.0;  // 超过则不发控制（保持云台）
 };
 
@@ -551,6 +552,70 @@ void on_rune_kpts(struct z_loaned_sample_t *sample, void *) {
   z_drop(z_move(owned));
 }
 
+// ---- rt/stat：模拟器发布的命中统计 {launch, accurate, pct}（5Hz，只读）----
+//   launch   总发弹数（键盘 Space 与 cmd/gimbal.fire 都计入）
+//   accurate 在激活窗口内命中符的弹数；pct = accurate/launch
+//   用途：把"拟合好坏"和【真实命中率】挂钩 —— 这是唯一能判断坏窗值不值得继续修的指标。
+std::mutex g_stat_mu;
+std::string g_stat_path;                 // 由 worker 打开 kpts 日志时设置
+std::atomic<uint64_t> g_stat_count{0};
+std::mutex g_stat_fp_mu;
+std::ofstream g_stat_log;
+bool g_stat_tried = false;
+long long g_stat_launch = 0, g_stat_accurate = 0;
+double g_stat_pct = 0.0;
+
+// 极简取值：payload 是 serde_json 的固定格式 {"launch":N,"accurate":N,"pct":F}
+static bool json_num(const char *s, const char *key, double *out) {
+  const char *p = std::strstr(s, key);
+  if (p == nullptr) return false;
+  p += std::strlen(key);
+  while (*p == ' ' || *p == ':' || *p == '"') ++p;
+  char *end = nullptr;
+  const double v = std::strtod(p, &end);
+  if (end == p) return false;
+  *out = v;
+  return true;
+}
+
+void on_rune_stat(struct z_loaned_sample_t *sample, void *) {
+  const struct z_loaned_bytes_t *pl = z_sample_payload(sample);
+  struct z_owned_slice_t owned;
+  if (z_bytes_to_slice(pl, &owned) != Z_OK) return;
+  const char *d = reinterpret_cast<const char *>(z_slice_data(z_loan(owned)));
+  const size_t n = z_slice_len(z_loan(owned));
+  std::string js(d, n);
+  double lc = 0, ac = 0, pc = 0;
+  json_num(js.c_str(), "\"launch\"", &lc);
+  json_num(js.c_str(), "\"accurate\"", &ac);
+  json_num(js.c_str(), "\"pct\"", &pc);
+  {
+    std::lock_guard<std::mutex> lk(g_stat_mu);
+    g_stat_launch = static_cast<long long>(lc);
+    g_stat_accurate = static_cast<long long>(ac);
+    g_stat_pct = pc;
+    g_stat_count++;
+    std::lock_guard<std::mutex> lk2(g_stat_fp_mu);
+    if (!g_stat_tried && !g_stat_path.empty()) {
+      g_stat_tried = true;
+      g_stat_log.open(g_stat_path, std::ios::trunc);
+      if (g_stat_log) {
+        g_stat_log << "wall_s,launch,accurate,pct\n";
+        std::cout << "[bridge] rt/stat log -> " << g_stat_path << std::endl;
+      }
+    }
+    if (g_stat_log.is_open()) {
+      const double ws = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch())
+                            .count() / 1000.0;
+      g_stat_log << ws << ',' << g_stat_launch << ',' << g_stat_accurate << ',' << g_stat_pct
+                 << '\n';
+      g_stat_log.flush();
+    }
+  }
+  z_drop(z_move(owned));
+}
+
 void on_pose(struct z_loaned_sample_t *sample, void *) {
   const struct z_loaned_bytes_t *pl = z_sample_payload(sample);
   struct z_owned_slice_t owned;
@@ -964,15 +1029,17 @@ int main(int argc, char **argv) {
     return 5;
   }
 
-  z_owned_closure_sample_t cb_pose, cb_img, cb_kpts;
+  z_owned_closure_sample_t cb_pose, cb_img, cb_kpts, cb_stat;
   z_closure_sample(&cb_pose, on_pose, NULL, NULL);
   z_closure_sample(&cb_img, on_image, NULL, NULL);
   z_closure_sample(&cb_kpts, on_rune_kpts, NULL, NULL);
-  z_view_keyexpr_t ke_pose, ke_img, ke_cmd, ke_kpts;
+  z_closure_sample(&cb_stat, on_rune_stat, NULL, NULL);
+  z_view_keyexpr_t ke_pose, ke_img, ke_cmd, ke_kpts, ke_stat;
   z_view_keyexpr_from_str(&ke_pose, bc.pose_topic.c_str());
   z_view_keyexpr_from_str(&ke_img, bc.image_topic.c_str());
   z_view_keyexpr_from_str(&ke_cmd, bc.cmd_topic.c_str());
   z_view_keyexpr_from_str(&ke_kpts, bc.rune_kpts_topic.c_str());
+  z_view_keyexpr_from_str(&ke_stat, bc.rune_stat_topic.c_str());
 
   z_owned_subscriber_t sub_pose, sub_img, sub_kpts;
   z_owned_publisher_t pub;
@@ -989,6 +1056,12 @@ int main(int argc, char **argv) {
                            NULL) != Z_OK) {
     // 不致命：模拟器还没发这个 topic 时只是没有真值日志
     std::cerr << "[bridge] subscribe rune_kpts failed (真值日志将为空)" << std::endl;
+  }
+  z_owned_subscriber_t sub_stat;
+  if (z_declare_subscriber(z_loan(s_pose), &sub_stat, z_loan(ke_stat), z_move(cb_stat), NULL) !=
+      Z_OK) {
+    // 同样不致命：没有 rt/stat 时只是没有命中率日志
+    std::cerr << "[bridge] subscribe rt/stat failed (命中率日志将为空)" << std::endl;
   }
   if (z_declare_publisher(z_loan(s_img), &pub, z_loan(ke_cmd), NULL) != Z_OK) {
     std::cerr << "[bridge] declare publisher failed" << std::endl;
@@ -1021,6 +1094,17 @@ int main(int argc, char **argv) {
       }
       g_kpts_log.open(kname, std::ios::trunc);
       std::cout << "[bridge] rune-kpts log -> " << kname << std::endl;
+      // 命中率日志与 kpts 日志同名：<base>.rtstat.csv（由 rt/stat 回调惰性打开）
+      {
+        std::lock_guard<std::mutex> lk(g_stat_mu);
+        const std::string suf = ".kpts.jsonl";
+        if (kname.size() > suf.size() &&
+            kname.compare(kname.size() - suf.size(), suf.size(), suf) == 0) {
+          g_stat_path = kname.substr(0, kname.size() - suf.size()) + ".rtstat.csv";
+        } else {
+          g_stat_path = kname + ".rtstat.csv";
+        }
+      }
     }
     while (!g_stop.load()) {
       if (!g_frame.take(&buf, &stamp)) continue;
@@ -1133,12 +1217,12 @@ int main(int argc, char **argv) {
         std::printf(
             "[bridge] #%llu age=%.0fms det=%d sel=%d solved=%d q=%d st=%d dis=%.2f "
             "roll=%.3f w=%.3f lead=%.3f lat=%.1fms cmd=(%.2f,%.2f) err=%.4f ctrl=%d fire=%d "
-            "nt=%d dlt=%.0f rc=%.2f fps=%.1f\n",
+            "nt=%d dlt=%.0f rc=%.2f fps=%.1f hit=%lld/%lld\n",
             static_cast<unsigned long long>(k), age_ms, out.n_det, out.n_selected,
             out.solved ? 1 : 0, out.quality ? 1 : 0, out.status, out.buff_dis, out.roll,
             out.roll_velocity, out.lead_s, out.latency_ms, yaw * 180 / M_PI, pitch * 180 / M_PI,
             out.fire_err, control ? 1 : 0, fire ? 1 : 0, out.dual_targets, out.dual_delta_deg,
-            out.rc_dist_m, fps_now);
+            out.rc_dist_m, fps_now, g_stat_accurate, g_stat_launch);
         std::fflush(stdout);
       }
       // 组号/身份诊断：每帧一行（有检出时）。判定方法：
