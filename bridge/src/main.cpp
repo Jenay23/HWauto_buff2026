@@ -18,6 +18,7 @@
 #include <csignal>
 #include <cstdio>
 #include <cstring>
+#include <iomanip>
 #include <deque>
 #include <iostream>
 #include <mutex>
@@ -611,8 +612,9 @@ void on_rune_stat(struct z_loaned_sample_t *sample, void *) {
       const double ws = std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::system_clock::now().time_since_epoch())
                             .count() / 1000.0;
-      g_stat_log << ws << ',' << g_stat_launch << ',' << g_stat_hits << ',' << g_stat_accurate
-                 << ',' << g_stat_pct << '\n';
+      g_stat_log << std::fixed << std::setprecision(3) << ws << ',' << g_stat_launch << ','
+                 << g_stat_hits << ',' << g_stat_accurate << ',' << std::setprecision(4)
+                 << g_stat_pct << '\n';
       g_stat_log.flush();
     }
   }
