@@ -562,7 +562,7 @@ std::atomic<uint64_t> g_stat_count{0};
 std::mutex g_stat_fp_mu;
 std::ofstream g_stat_log;
 bool g_stat_tried = false;
-long long g_stat_launch = 0, g_stat_accurate = 0;
+long long g_stat_launch = 0, g_stat_accurate = 0, g_stat_hits = 0;
 double g_stat_pct = 0.0;
 
 // 极简取值：payload 是 serde_json 的固定格式 {"launch":N,"accurate":N,"pct":F}
@@ -585,14 +585,16 @@ void on_rune_stat(struct z_loaned_sample_t *sample, void *) {
   const char *d = reinterpret_cast<const char *>(z_slice_data(z_loan(owned)));
   const size_t n = z_slice_len(z_loan(owned));
   std::string js(d, n);
-  double lc = 0, ac = 0, pc = 0;
+  double lc = 0, ac = 0, pc = 0, hc = 0;
   json_num(js.c_str(), "\"launch\"", &lc);
   json_num(js.c_str(), "\"accurate\"", &ac);
   json_num(js.c_str(), "\"pct\"", &pc);
+  json_num(js.c_str(), "\"hits\"", &hc);   // ★ 真命中（HUD 上那个 hits=）
   {
     std::lock_guard<std::mutex> lk(g_stat_mu);
     g_stat_launch = static_cast<long long>(lc);
     g_stat_accurate = static_cast<long long>(ac);
+    g_stat_hits = static_cast<long long>(hc);
     g_stat_pct = pc;
     g_stat_count++;
     std::lock_guard<std::mutex> lk2(g_stat_fp_mu);
@@ -600,7 +602,8 @@ void on_rune_stat(struct z_loaned_sample_t *sample, void *) {
       g_stat_tried = true;
       g_stat_log.open(g_stat_path, std::ios::trunc);
       if (g_stat_log) {
-        g_stat_log << "wall_s,launch,accurate,pct\n";
+        // launch=发弹数, hits=真命中(打中点亮片), accurate=接触次数(可>launch)
+        g_stat_log << "wall_s,launch,hits,accurate,pct\n";
         std::cout << "[bridge] rt/stat log -> " << g_stat_path << std::endl;
       }
     }
@@ -608,8 +611,8 @@ void on_rune_stat(struct z_loaned_sample_t *sample, void *) {
       const double ws = std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::system_clock::now().time_since_epoch())
                             .count() / 1000.0;
-      g_stat_log << ws << ',' << g_stat_launch << ',' << g_stat_accurate << ',' << g_stat_pct
-                 << '\n';
+      g_stat_log << ws << ',' << g_stat_launch << ',' << g_stat_hits << ',' << g_stat_accurate
+                 << ',' << g_stat_pct << '\n';
       g_stat_log.flush();
     }
   }
@@ -1222,7 +1225,7 @@ int main(int argc, char **argv) {
             out.solved ? 1 : 0, out.quality ? 1 : 0, out.status, out.buff_dis, out.roll,
             out.roll_velocity, out.lead_s, out.latency_ms, yaw * 180 / M_PI, pitch * 180 / M_PI,
             out.fire_err, control ? 1 : 0, fire ? 1 : 0, out.dual_targets, out.dual_delta_deg,
-            out.rc_dist_m, fps_now, g_stat_accurate, g_stat_launch);
+            out.rc_dist_m, fps_now, g_stat_hits, g_stat_launch);
         std::fflush(stdout);
       }
       // 组号/身份诊断：每帧一行（有检出时）。判定方法：
