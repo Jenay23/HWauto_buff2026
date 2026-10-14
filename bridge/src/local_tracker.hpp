@@ -190,6 +190,9 @@ class LocalRuneTracker {
   //   样本重新自举。原来不处理的话，烂模型会把干净样本全拒掉，要等 15 次连续拒绝才 reset。
   double bad_rms_deg_ = 30.0;
   int reboot_keep_ = 10;
+  // 自愈的样本数下限：窗口小于它时的高 rms 属于"自举期不可辨识"，不是模型发疯。
+  // 实测不加这个下限会空转（10 帧内连触发 4 次），反而制造坏窗。
+  int heal_min_n_ = 24;
 
   // free
   int free_locked_ = 0;
