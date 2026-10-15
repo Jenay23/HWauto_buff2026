@@ -199,7 +199,7 @@ struct Config {
   bool fire_enabled = true;
   double fire_err_rad = 0.02;
   int fire_stable_frames = 3;
-  double fire_cooldown = 1.0;
+  double fire_cooldown = 0.1;   // 桥的敲门节流（默认 0.1 = 10Hz），必须 <= 模拟器冷却
   // 开火纪律（针对"空单"）：模拟器冷却 1.0 s 且 fire 被消费，桥若每帧都发
   // fire=true，实际开火时刻就由模拟器冷却到期决定，桥的对准判定形同虚设。
   // 实测开火命令 97% 间隔 <0.2s、开火时 status 有 261 帧是 CONVERGING(0)。
