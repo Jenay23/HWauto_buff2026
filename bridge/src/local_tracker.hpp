@@ -61,26 +61,14 @@ class LocalRuneTracker {
   void set_bad_rms_deg(double d) { bad_rms_deg_ = d; }
   int jump_dropped() const { return jump_dropped_; }
   bool lost() const { return lost_; }
-  bool hit_confirmed() const { return hit_confirmed_; }   // 连续 >=hit_s_ 有靶标 -> 视为命中
-  // 灭灯分两种：短暂缺失 -> 滑行（保留参数）；真正灭灯（超过 coast_s_）-> 清空参数。
-  // 依据：模拟器每次【新激活】都会重抽 (a, w)，所以旧参数跨激活没有意义。
+  // 灭灯：短暂掉检（<0.35 s）不清历史，让稳健拟合继续用已有窗口；真正灭灯才清。
+  // 这是"快速拿到 1 s 窗口"的关键——单帧丢失不再让拟合从零开始。
+  // （bridge/prune：原来的 mode-6 滑行/快照分支已随 modes 0/3/6 一起删除）
   void on_dark(double t) {
-    if (mode_ == 6 && locked_ != 0 && last_data_t_ > 0.0 && (t - last_data_t_) > coast_s_) {
-      reset();                 // 清空（含快照/命中标记）
-      lost_ = true;            // 报靶标消失（reset 会清掉，所以再置一次）
-      lost_reported_ = true;
-      return;
-    }
-    // mode 7：短暂掉检（<0.35 s）不清历史，让稳健拟合继续用已有窗口；
-    // 真正灭灯才清。这是"快速拿到 1 s 窗口"的关键——单帧丢失不再让拟合从零开始。
     if (mode_ == 7 && !h_.empty() && last_data_t_ > 0.0 && (t - last_data_t_) < 0.35) {
-      last_dark_t_ = t;
-      hit_confirmed_ = false;
       return;
     }
-    last_dark_t_ = t;
-    hit_confirmed_ = false;
-    reset();                   // mode6 且未超时 -> reset 内部会走滑行分支（保留参数）
+    reset();
   }
   bool lost_reported() const { return lost_reported_; }
   bool coasting() const { return coasting_; }
@@ -89,8 +77,7 @@ class LocalRuneTracker {
   void set_min_samples(int n) { min_n_ = n; }
   void set_min_span_deg(double d) { min_span_deg_ = d; }
   void set_max_rms_deg(double d) { max_rms_deg_ = d; }
-  void set_relock_rms_deg(double d) { relock_rms_deg_ = d; }
-  void set_rms_gates(double d) { max_rms_deg_ = d; relock_rms_deg_ = d; }
+  void set_rms_gates(double d) { max_rms_deg_ = d; }
   void set_coast_s(double s) { coast_s_ = s; }
   void set_ridge(double r) { ridge_ = r; }
   void set_mode(int m) {
@@ -113,11 +100,8 @@ class LocalRuneTracker {
   double meanDt() const;
 
   // --- mode 0: csine ---
-  bool solveLinear(double a, double w, Eigen::Vector3d *coef, double *rms_rad);
-  void refitShape();
 
   // --- mode 3: free linear sine ---
-  bool fitFree(Eigen::Vector4d *coef, double *w_out, double *t_ref_out);
 
   // --- mode 7: physical constrained model, robust LM ---
   void physFit();
@@ -132,8 +116,6 @@ class LocalRuneTracker {
   int min_n_ = 12;
   double min_span_deg_ = 30.0;
   double max_rms_deg_ = 2.5;
-  double relock_rms_deg_ = 4.0;
-  int tune_tick_ = 0;   // 超过它就重新搜 (a,w)（原来写死 4.0）
   double ridge_ = 1e-3;
   double v_now_ = 0.0;
   double a_now_ = 0.0;
@@ -148,23 +130,10 @@ class LocalRuneTracker {
   bool lost_reported_ = false;   // mutable: predict() 是 const，超时要在里面置位
   double last_data_t_ = 0.0;
   double coast_s_ = 0.2;   // 只容忍【短暂缺失】；超过它 = 真灭灯 -> 清空参数
-  double hit_s_ = 2.6;     // 连续这么久都没进空窗 -> 判定命中（激活没结束）
-  bool hit_confirmed_ = false;
-  double last_dark_t_ = 0.0;
-  double no_dark_s_ = 0.0;
-  bool have_snapshot_ = false;      // 命中确认时的参数快照（当 warm start 用）
-  double snap_a_ = 0.0, snap_w_ = 0.0, snap_t_ = 0.0;
-  Eigen::Vector3d snap_c_ = Eigen::Vector3d::Zero();   // 灭灯后继续外推的上限（= 亮灯 2.5s − 拟合 1s）
-  double fit_s_ = 1.0;     // 先攒够 1.0 s 数据，再做一次（较贵的）网格搜索
   int drop_run_ = 0;       // 连续被丢的帧数
 
   // csine
   int locked_ = 0;
-  double lock_a_ = 0.0;
-  double lock_w_ = 0.0;
-  Eigen::Vector3d lin_c_ = Eigen::Vector3d::Zero();
-  double t_ref_ = 0.0;
-  double sgn_ = 1.0;
 
   // phys (mode 7)
   int phys_valid_ = 0;
@@ -190,10 +159,6 @@ class LocalRuneTracker {
   int heal_min_n_ = 24;
 
   // free
-  int free_locked_ = 0;
-  Eigen::Vector4d free_c_ = Eigen::Vector4d::Zero();
-  double free_w_ = 0.0;
-  double free_t_ref_ = 0.0;
 
 
 };

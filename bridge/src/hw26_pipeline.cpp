@@ -1423,7 +1423,9 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       out.local_span_deg = I.local_trk.span_deg();
       out.local_drop = I.local_trk.jump_dropped();
       out.local_lost = I.local_trk.lost() ? 1 : 0;
-      out.local_hit = I.local_trk.hit_confirmed() ? 1 : 0;
+      // bridge/prune：mode-6 的"命中确认(hit_s_)"已随 modes 0/3/6 删除，
+      // mode 7 下没有等价量 -> 该诊断恒为 0（[dual] 行的 hit= 同理）。
+      out.local_hit = 0;
     }
 
     // 6f-1) 相位低通（滑动平均 N 帧，解缠后平均）。目的见 Config::phase_ma_n 注释。

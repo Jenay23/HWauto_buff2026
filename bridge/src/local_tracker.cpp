@@ -11,49 +11,22 @@ constexpr double kALo = 0.780, kAHi = 1.045;
 constexpr double kWLo = 1.884, kWHi = 2.000;
 constexpr double kMean = 2.090;
 constexpr double kMaxSpeed = 2.090;
-constexpr double I_FIT_S_MIN = 1.0;   // mode6: 攒够 1 s 才做一次网格搜索     // 绝对约束: v_max = 2.090 rad/s（与 a 无关）
-constexpr double kMeanSpeedLo = 1.045;  // = 2.090 - 1.045
-constexpr double kMeanSpeedHi = 1.310;  // = 2.090 - 0.780        // 官方: speed = a*sin(w t+phi) + (2.090-a)
-constexpr int kASteps = 24;
-constexpr int kWSteps = 10;
-constexpr double kRidge = 1e-6;
-constexpr double kLockRmsDeg = 2.0;
-// （重锁门改成了成员 relock_rms_deg_，可由配置设置）
 
 double wrapPi(double a) {
   while (a > kPi) a -= 2.0 * kPi;
   while (a <= -kPi) a += 2.0 * kPi;
   return a;
 }
-bool solve3(const Eigen::Matrix3d &A_in, const Eigen::Vector3d &b, Eigen::Vector3d *x) {
-  Eigen::Matrix3d A = A_in;
-  for (int i = 0; i < 3; ++i) A(i, i) += 1e-9;
-  Eigen::Vector3d r = A.ldlt().solve(b);
-  if (!r.allFinite()) return false;
-  *x = r;
-  return true;
-}
 }  // namespace
 
 void LocalRuneTracker::reset() {
-  // mode 6（滑行）：灭灯时保留拟合参数，只清样本 -> 之后用解析式继续外推。
-  // 依据：模拟器里一组 (a, w) 一次激活只抽一次、之后不变（power_rune.rs），
-  // 所以亮灯期拟合的模型在灭灯期依然有效 —— 这是物理延续，不是猜测。
-  if (mode_ == 6 && locked_ != 0 && !lost_) {   // 未超时 -> 滑行；已 lost -> 落到下面完整重置
-    if (!h_.empty()) last_data_t_ = h_.back().t;
-    h_.clear();
-    have_last_ = false;
-    coasting_ = true;
-    drop_run_ = 0;
-    return;
-  }
   h_.clear();
   have_last_ = false;
   v_now_ = a_now_ = omega_ = amp_ = 0.0;
   rms_deg_ = -1.0;
   span_deg_ = 0.0;
   drop_run_ = 0;
-  locked_ = free_locked_ = 0;
+  locked_ = 0;
   phys_valid_ = 0;
   sector_off_ = 0.0;
   lost_ = false;
@@ -68,93 +41,6 @@ void LocalRuneTracker::computeSpanAndDt() {
 }
 
 double LocalRuneTracker::meanDt() const { return dt_ema_ > 1e-4 ? dt_ema_ : 1.0 / 30.0; }
-
-// ======================= mode 0: csine（官方约束）=======================
-bool LocalRuneTracker::solveLinear(double a, double w, Eigen::Vector3d *coef, double *rms_rad) {
-  const int n = static_cast<int>(h_.size());
-  if (n < 4) return false;
-  const double coarse =
-      (h_.back().roll - h_.front().roll) / (h_.back().t - h_.front().t + 1e-9);
-  sgn_ = (coarse < 0.0) ? -1.0 : 1.0;
-  Eigen::Matrix3d A = Eigen::Matrix3d::Zero();
-  Eigen::Vector3d b = Eigen::Vector3d::Zero();
-  for (const auto &s : h_) {
-    const double tau = s.t - t_ref_;
-    const double y = s.roll - sgn_ * (kMean - a) * tau;
-    Eigen::Vector3d phi(1.0, 1.0 - std::cos(w * tau), std::sin(w * tau));
-    A += phi * phi.transpose();
-    b += phi * y;
-  }
-  Eigen::Vector3d c;
-  if (!solve3(A, b, &c)) return false;
-  double se = 0.0;
-  for (const auto &s : h_) {
-    const double tau = s.t - t_ref_;
-    const double p = sgn_ * (kMean - a) * tau + c(0) +
-                     sgn_ * (c(1) * (1.0 - std::cos(w * tau)) + c(2) * std::sin(w * tau));
-    se += (s.roll - p) * (s.roll - p);
-  }
-  *coef = c;
-  *rms_rad = std::sqrt(se / static_cast<double>(n));
-  return true;
-}
-
-void LocalRuneTracker::refitShape() {
-  double best = 1e18, ba = 0, bw = 0;
-  Eigen::Vector3d bc = Eigen::Vector3d::Zero();
-  bool found = false;
-  for (int ia = 0; ia <= kASteps; ++ia) {
-    const double a = kALo + (kAHi - kALo) * ia / kASteps;
-    for (int iw = 0; iw <= kWSteps; ++iw) {
-      const double w = kWLo + (kWHi - kWLo) * iw / kWSteps;
-      Eigen::Vector3d c;
-      double r = 0;
-      if (!solveLinear(a, w, &c, &r)) continue;
-      if (!found || r < best) { found = true; best = r; ba = a; bw = w; bc = c; }
-    }
-  }
-  if (!found) return;
-  lock_a_ = ba; lock_w_ = bw; lin_c_ = bc; locked_ = 1;
-  omega_ = bw; amp_ = ba; rms_deg_ = best * 180.0 / kPi;
-}
-
-// ======================= mode 3: free linear sine =======================
-bool LocalRuneTracker::fitFree(Eigen::Vector4d *coef, double *w_out, double *t_ref_out) {
-  const int n = static_cast<int>(h_.size());
-  if (n < 4) return false;
-  const double t_ref = 0.5 * (h_.front().t + h_.back().t);
-  double best = 1e18;
-  Eigen::Vector4d bc = Eigen::Vector4d::Zero();
-  double bw = 0;
-  bool found = false;
-  for (int gi = 0; gi <= 64; ++gi) {
-    const double w = kWLo + (kWHi - kWLo) * gi / 64;
-    Eigen::Matrix4d A = Eigen::Matrix4d::Zero();
-    Eigen::Vector4d b = Eigen::Vector4d::Zero();
-    for (const auto &s : h_) {
-      const double tau = s.t - t_ref;
-      Eigen::Vector4d phi(1.0, tau, std::sin(w * tau), std::cos(w * tau));
-      A += phi * phi.transpose();
-      b += phi * s.roll;
-    }
-    for (int i = 1; i < 4; ++i) A(i, i) += kRidge;
-    const Eigen::Vector4d c = A.ldlt().solve(b);
-    if (!c.allFinite()) continue;
-    double se = 0.0;
-    for (const auto &s : h_) {
-      const double tau = s.t - t_ref;
-      const double p = c(0) + c(1) * tau + c(2) * std::sin(w * tau) + c(3) * std::cos(w * tau);
-      se += (s.roll - p) * (s.roll - p);
-    }
-    const double r = std::sqrt(se / n);
-    if (!found || r < best) { found = true; best = r; bc = c; bw = w; }
-  }
-  if (!found) return false;
-  *coef = bc; *w_out = bw; *t_ref_out = t_ref;
-  omega_ = bw; amp_ = std::hypot(bc(2), bc(3)) * bw;
-  rms_deg_ = best * 180.0 / kPi;
-  return true;
-}
 
 // ======================= mode 7: physical model + robust LM =======================
 //
@@ -353,20 +239,6 @@ void LocalRuneTracker::physFit() {
 
 // ======================= push / ready / predict =======================
 void LocalRuneTracker::push(double t, double roll) {
-  // ★ 用户思路：如果连续 hit_s_ 秒都没有进入空窗（一直没有 det==0），
-  //   说明【刚打中了】—— 而命中恰恰证明"刚拟合出来的那组参数是对的"。
-  //   所以把它快照下来，之后不要从零重新拟合。
-  no_dark_s_ = t - last_dark_t_;
-  if (mode_ == 6 && no_dark_s_ >= hit_s_ && !hit_confirmed_) {
-    hit_confirmed_ = true;
-    if (locked_ != 0) {
-      snap_a_ = lock_a_;
-      snap_w_ = lock_w_;
-      snap_c_ = lin_c_;
-      snap_t_ = t_ref_;
-      have_snapshot_ = true;
-    }
-  }
   // ★★ 扇区重参考（RP-26Rune resolve_track_after_phase_jump 的移植）★★
   //   换片/换组时观测相位整体平移 k·(2π/5)（5 个扇区）。与其丢帧/重置，不如给观测
   //   加一个常量偏移 sector_off_，把新扇区折回原参考系：相位连续、窗口不清空、
@@ -450,109 +322,9 @@ void LocalRuneTracker::push(double t, double roll) {
   computeSpanAndDt();
   if (static_cast<int>(h_.size()) < 4) return;
 
-  if (mode_ == 0 || mode_ == 6) {         // csine / mode6(滑行)
-    t_ref_ = 0.5 * (h_.front().t + h_.back().t);
-    if (locked_ == 0) {
-      // ★ 有命中快照时：先用它试一次（参数很可能就是它）——成功就直接锁定，
-      //   不必再等 1 s、也不必再全范围搜索。失败则照旧走"攒 1 s + 网格搜索"。
-      bool snap_ok = false;
-      if (mode_ == 6 && have_snapshot_) {
-        Eigen::Vector3d c;
-        double r = 0;
-        const double keep_ref = t_ref_;
-        t_ref_ = snap_t_;                    // 快照的相位基准必须一起用，否则相位会错
-        if (solveLinear(snap_a_, snap_w_, &c, &r) && r >= 0.0 && r * 180.0 / M_PI <= 4.0) {
-          lock_a_ = snap_a_;
-          lock_w_ = snap_w_;
-          lin_c_ = c;
-          locked_ = 1;
-          rms_deg_ = r;
-          omega_ = snap_w_;
-          amp_ = snap_a_;
-          lost_ = false;
-          coasting_ = false;
-          last_data_t_ = t;
-          snap_ok = true;
-        } else {
-          t_ref_ = keep_ref;
-        }
-      }
-      if (!snap_ok) {
-        // mode 6：先攒够 fit_s_ 秒再做一次网格搜索（"推理用 1 s"）；期间不预测
-        const double span_s = h_.back().t - h_.front().t;
-        if (mode_ != 6 || span_s >= I_FIT_S_MIN) {
-          refitShape();
-        }
-      }
-    } else if (mode_ == 6) {
-      // 锁定后每帧重解线性部分；每 5 帧做一次局部微调。
-      // 为什么：锁定时的 (a,Omega) 可能不准（实测常被顶到网格下界 1.884/0.780），
-      // 而一次激活内又不能重来 —— 所以必须允许它慢慢收敛。
-      // 原则：只接受明显变好的结果，且永不回退到未锁定 —— 只会更准，不会乱跳。
-      Eigen::Vector3d c;
-      double r = 0;
-      if (solveLinear(lock_a_, lock_w_, &c, &r)) {
-        lin_c_ = c;
-        rms_deg_ = r * 180.0 / M_PI;
-        lost_ = false;
-        coasting_ = false;
-        last_data_t_ = t;
-        if (++tune_tick_ >= 5) {
-          tune_tick_ = 0;
-          const double da = (kAHi - kALo) / kASteps;
-          const double dw = (kWHi - kWLo) / kWSteps;
-          for (int ia = -2; ia <= 2; ++ia) {
-            for (int iw = -2; iw <= 2; ++iw) {
-              if (ia == 0 && iw == 0) continue;
-              const double a2 = std::clamp(lock_a_ + ia * da, kALo, kAHi);
-              const double w2 = std::clamp(lock_w_ + iw * dw, kWLo, kWHi);
-              Eigen::Vector3d c2;
-              double r2 = 0;
-              if (!solveLinear(a2, w2, &c2, &r2)) continue;
-              if (r2 < r * 0.995) {
-                r = r2;
-                c = c2;
-                lock_a_ = a2;
-                lock_w_ = w2;
-                omega_ = w2;
-                amp_ = a2;
-              }
-            }
-          }
-          lin_c_ = c;
-          rms_deg_ = r * 180.0 / M_PI;
-        }
-      }
-    } else {
-      Eigen::Vector3d c;
-      double r = 0;
-      if (solveLinear(lock_a_, lock_w_, &c, &r)) {
-        lin_c_ = c;
-        lost_ = false; coasting_ = false; last_data_t_ = t;
-        rms_deg_ = r * 180.0 / kPi;
-        if (rms_deg_ > relock_rms_deg_) { locked_ = 0; refitShape(); }
-      }
-    }
-    if (locked_) {
-      const double tau = t - t_ref_;
-      const double p = lin_c_(1), q = lin_c_(2);
-      v_now_ = sgn_ * ((kMean - lock_a_) +
-                       lock_w_ * (p * std::sin(lock_w_ * tau) + q * std::cos(lock_w_ * tau)));
-      a_now_ = sgn_ * lock_w_ * lock_w_ *
-               (p * std::cos(lock_w_ * tau) - q * std::sin(lock_w_ * tau));
-    }
-  } else if (mode_ == 7) {                 // 物理约束模型 + 稳健 LM
+  if (mode_ == 7) {                 // 物理约束模型 + 稳健 LM
     last_data_t_ = t;
     physFit();
-  } else {                                 // free linear sine
-    Eigen::Vector4d c;
-    double w = 0, tr = 0;
-    if (fitFree(&c, &w, &tr)) {
-      free_c_ = c; free_w_ = w; free_t_ref_ = tr; free_locked_ = 1;
-      const double tau = t - tr;
-      v_now_ = c(1) + w * (c(2) * std::cos(w * tau) - c(3) * std::sin(w * tau));
-      a_now_ = -w * w * (c(2) * std::sin(w * tau) + c(3) * std::cos(w * tau));
-    }
   }
 }
 
@@ -564,43 +336,16 @@ bool LocalRuneTracker::ready() const {
     return phys_valid_ != 0 && static_cast<int>(h_.size()) >= 8 &&
            span_deg_ >= min_span_deg_ && rms_deg_ >= 0.0 && rms_deg_ <= max_rms_deg_;
   }
-  if (mode_ == 0) {
-    return locked_ != 0 && static_cast<int>(h_.size()) >= 4 && rms_deg_ >= 0.0 &&
-           rms_deg_ <= max_rms_deg_;
-  }
-  if (mode_ == 6) {   // 滑行：拟合成功即可用（滑行期间也算），超时则不可用
-    return locked_ != 0 && !lost_;
-  }
-  return free_locked_ != 0 && static_cast<int>(h_.size()) >= min_n_ && rms_deg_ >= 0.0 &&
-         rms_deg_ <= max_rms_deg_;
+  return false;
 }
 
 bool LocalRuneTracker::predict(double t_future, double *roll_out) const {
   if (!ready()) return false;
   const double dt = meanDt();
-  if (mode_ == 6) {   // 滑行：冻结参数继续外推；超过 coast_s_ 报消失
-    if (locked_ == 0) return false;
-    if (last_data_t_ > 0.0 && (t_future - last_data_t_) > coast_s_) {
-      lost_ = true;
-      return false;
-    }
-  }
   if (mode_ == 7) {
     if (last_data_t_ > 0.0 && (t_future - last_data_t_) > 1.0) return false;
     *roll_out = wrapPi(physEval(t_future));
     return true;
   }
-  if (mode_ == 0 || mode_ == 6) {
-    const double tau = t_future - t_ref_;
-    if (std::abs(tau) > 3.0) return false;
-    const double p = lin_c_(1), q = lin_c_(2);
-    *roll_out = wrapPi(sgn_ * (kMean - lock_a_) * tau + lin_c_(0) +
-                       sgn_ * (p * (1.0 - std::cos(lock_w_ * tau)) + q * std::sin(lock_w_ * tau)));
-    return true;
-  }
-  const double tau = t_future - free_t_ref_;
-  if (std::abs(tau) > 3.0) return false;
-  *roll_out = wrapPi(free_c_(0) + free_c_(1) * tau + free_c_(2) * std::sin(free_w_ * tau) +
-                     free_c_(3) * std::cos(free_w_ * tau));
-  return true;
+  return false;
 }
