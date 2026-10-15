@@ -189,6 +189,23 @@ void LocalRuneTracker::physFit() {
     const double max_span = kMaxSpeed * std::max(0.05, dt_span) * 1.5 + 0.3;
     if (std::abs(h_.back().roll - h_.front().roll) > max_span) {
       phys_valid_ = 0;
+      // bridge/stuckfix: 必须就地清窗，不能只置 phys_valid_=0 然后 return。
+      // 本函数在这里就 return，后面那套 rms>30 度的自愈根本走不到；而这种坏窗的 rms
+      // 可以极小（实测 0.8 度），rms 门永远不触发 -> 坏样本永远留在窗口 ->
+      // phys_valid_ 永远 0 -> push() 的模型创新门被禁用（要求 phys_valid_） ->
+      // 窗口长不大、rdy 恒 0、rej/drop 冻结。实测卡死 22~55 条 [dual]（约 7~16 秒），
+      // 症状 local n=12 rdy=0 rms=0.8deg span=267deg（12 样本 0.36s 却转 267 度）。
+      // 短窗口 + 不可能的 span 本身就是确凿的坏样本，故不加 heal_min_n_ 下限
+      //（函数入口已保证 n>=6）。只从头部弹到 span 恢复可能为止，最多弹到 reboot_keep_。
+      ++phys_heal_;
+      locked_ = 0;
+      const int keep = std::max(4, reboot_keep_);
+      while (static_cast<int>(h_.size()) > keep) {
+        h_.pop_front();
+        const double dtp = h_.back().t - h_.front().t;
+        const double lim = kMaxSpeed * std::max(0.05, dtp) * 1.5 + 0.3;
+        if (std::abs(h_.back().roll - h_.front().roll) <= lim) break;
+      }
       return;
     }
   }
