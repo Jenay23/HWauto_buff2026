@@ -2,3 +2,6 @@ build/
 model/
 *.csv
 *.png
+# 运行产物：真值日志 / 命中率日志 / Python 缓存，都不进 git
+*.jsonl
+__pycache__/
