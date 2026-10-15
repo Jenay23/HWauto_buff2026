@@ -8,18 +8,22 @@
 // LocalRuneTracker —— 桥自己的"局部相位 tracker"（大符专用）
 // ============================================================================
 //
-// 【可选四种估计器】由配置 local_model 切换（改配置即可，不用重编译）：
-//   0 = csine  ：官方约束模型 phase = theta0 + sgn*[(2.090-a)t + p(1-cos wt) + q sin wt]
-//                (a,w) 在官方边界内【网格搜索】+ 每帧重解线性部分 (theta0,p,q)
-//                离线实测（干净数据）227/341/455 ms 误差 2.30/3.69/5.09 度，最好
-//   1 = AR(p)  ：纯数据驱动 theta(t)=sum c_i theta(t-i)，系数最小二乘 + 递推多步
-//                离线实测干净数据 114 ms 0.5~0.75 度最好，长程变差
-//   2 = EKF    ：状态 [theta,a,w,phi]，过程用官方速度公式，观测 theta，带创新门
-//                注意：离线实测它【不好】—— 只测 theta 且窗口不足 1 周期时 a/w 不可辨识，
-//                它和批拟合撞同一堵墙。留在这里是为了对比，不建议作为主方案。
-//   3 = free   ：自由线性正弦 phase = c0 + c1*t + c2*sin(wt) + c3*cos(wt)（w 网格）
-//                c1 自由 -> 能适配任意转向，但会吸收噪声斜率 -> 会漂
-//   7 = phys   ：★唯一推荐。直接把模拟器物理模型
+// 【估计器清单】（bridge/prune 起：只清理死代码，不改行为）
+//   ★★ 注意：本文件里 **mode 0/1/3/4/5/6 的代码已删或已不推荐**，当前配置
+//      `local_model = 7` 下**只有 mode 7 会执行**；其余分支属于历史遗留。
+//   ---- 已删除（bridge/prune Part 1/2）----
+//   ✗ 1 = AR(p)  ：纯数据驱动。bridge/prune Part 2 删除
+//   ✗ 2 = EKF    ：状态 [theta,a,w,phi]，观测 theta。bridge/prune Part 1 删除
+//                  （离线实测它【不好】：只测 theta 且窗口不足 1 周期时 a/w 不可辨识，
+//                    它和批拟合撞同一堵墙）
+//   ---- 仍在文件里但当前配置下不会走（待 Part 3/4 清理）----
+//     0 = csine  ：官方约束模型 phase = theta0 + sgn*[(2.090-a)t + p(1-cos wt) + q sin wt]
+//                 (a,w) 在官方边界内【网格搜索】+ 每帧重解线性部分 (theta0,p,q)
+//     3 = free   ：自由线性正弦 phase = c0 + c1*t + c2*sin(wt) + c3*cos(wt)（w 网格）
+//                 c1 自由 -> 能适配任意转向，但会吸收噪声斜率 -> 会漂
+//     6 = table  ：表格拟合 + 滑行
+//   ---- ★ 当前唯一生效 ----
+//   7 = phys   ：直接把模拟器物理模型
 //                phase = th0 + sgn*[(2.090-a)t + (a/w)(cos phi - cos(wt+phi))]
 //                用【稳健 Levenberg-Marquardt】整体拟合 (th0,a,w,phi)，a/w 硬夹在
 //                官方区间；不需要网格、不需要多档门限、对跳变用 Huber 权重自动降权。
@@ -119,9 +123,6 @@ class LocalRuneTracker {
   void physFit();
   double physEval(double t) const;
 
-  // --- mode 1: AR ---
-  void fitAR();  // 更新 ar_c_
-
   std::deque<Sample> h_;
   double last_raw_ = 0.0;
   double last_unwrapped_ = 0.0;
@@ -194,8 +195,5 @@ class LocalRuneTracker {
   double free_w_ = 0.0;
   double free_t_ref_ = 0.0;
 
-  // AR
-  int ar_p_ = 4;
-  std::deque<double> ar_c_;
 
 };

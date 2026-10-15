@@ -56,7 +56,6 @@ void LocalRuneTracker::reset() {
   locked_ = free_locked_ = 0;
   phys_valid_ = 0;
   sector_off_ = 0.0;
-  ar_c_.clear();
   lost_ = false;
   coasting_ = false;
 }
@@ -352,56 +351,6 @@ void LocalRuneTracker::physFit() {
   a_now_ = sgn * a * w * std::cos(w * t + phi);
 }
 
-// ======================= mode 1: AR(p) =======================
-void LocalRuneTracker::fitAR() {
-  const int p = ar_p_;
-  const int n = static_cast<int>(h_.size());
-  if (n < p + 3) return;
-  std::vector<double> y;
-  y.reserve(n);
-  for (const auto &s : h_) y.push_back(s.roll);
-  // 去均值：相位绝对值可能离 0 很远，减掉均值能显著改善条件数
-  double mu = 0.0;
-  for (double v : y) mu += v;
-  mu /= n;
-  Eigen::MatrixXd A(n - p, p);
-  Eigen::VectorXd b(n - p);
-  for (int k = p; k < n; ++k) {
-    for (int i = 0; i < p; ++i) A(k - p, i) = y[k - i - 1] - mu;
-    b(k - p) = y[k] - mu;
-  }
-  Eigen::MatrixXd AtA = A.transpose() * A;
-  const double tr = AtA.trace() / static_cast<double>(p);
-  const double ridge = 1e-6 * (tr > 0 ? tr : 1.0);   // 相对 ridge，脏数据下也能解
-  for (int i = 0; i < p; ++i) AtA(i, i) += ridge;
-  Eigen::VectorXd c = AtA.ldlt().solve(A.transpose() * b);
-  if (!c.allFinite()) {
-    // 拟合失败 -> 退化为"等速外推"：theta(k) = 2*theta(k-1) - theta(k-2)
-    ar_c_.clear();
-    ar_c_.push_back(2.0);
-    ar_c_.push_back(-1.0);
-    ar_p_ = 2;
-    rms_deg_ = -1.0;
-    locked_ = 1;
-    return;
-  }
-  ar_c_.assign(c.data(), c.data() + p);
-  double se = 0.0;
-  for (int k = p; k < n; ++k) {
-    double pr = 0.0;
-    for (int i = 0; i < p; ++i) pr += c(i) * (y[k - i - 1] - mu);
-    pr += mu;
-    se += (y[k] - pr) * (y[k] - pr);
-  }
-  rms_deg_ = std::sqrt(se / std::max(1, n - p)) * 180.0 / kPi;
-  locked_ = 1;
-  const double dt = meanDt();
-  if (n >= 3) {
-    v_now_ = (y[n - 1] - y[n - 3]) / (2.0 * dt);
-    a_now_ = (y[n - 1] - 2.0 * y[n - 2] + y[n - 3]) / (dt * dt);
-  }
-}
-
 // ======================= push / ready / predict =======================
 void LocalRuneTracker::push(double t, double roll) {
   // ★ 用户思路：如果连续 hit_s_ 秒都没有进入空窗（一直没有 det==0），
@@ -595,8 +544,6 @@ void LocalRuneTracker::push(double t, double roll) {
   } else if (mode_ == 7) {                 // 物理约束模型 + 稳健 LM
     last_data_t_ = t;
     physFit();
-  } else if (mode_ == 1 || mode_ == 4) {   // AR / AR+包络
-    fitAR();
   } else {                                 // free linear sine
     Eigen::Vector4d c;
     double w = 0, tr = 0;
@@ -621,20 +568,8 @@ bool LocalRuneTracker::ready() const {
     return locked_ != 0 && static_cast<int>(h_.size()) >= 4 && rms_deg_ >= 0.0 &&
            rms_deg_ <= max_rms_deg_;
   }
-  if (mode_ == 1) {
-    return static_cast<int>(ar_c_.size()) > 0 && static_cast<int>(h_.size()) >= min_n_ &&
-           span_deg_ >= min_span_deg_ && rms_deg_ >= 0.0 && rms_deg_ <= max_rms_deg_;
-  }
   if (mode_ == 6) {   // 滑行：拟合成功即可用（滑行期间也算），超时则不可用
     return locked_ != 0 && !lost_;
-  }
-  if (mode_ == 5) {   // AR 裸预测：真正无门 —— 有 2 个样本就可用
-    return static_cast<int>(h_.size()) >= 2;
-  }
-  if (mode_ == 4) {   // AR + 物理包络：不用 rms 门（AR 拟合脏数据必然 rms 大），
-                      // 安全性由 predict() 里的"速度不超过 2.090 rad/s"保证
-    return static_cast<int>(ar_c_.size()) > 0 && static_cast<int>(h_.size()) >= min_n_ &&
-           span_deg_ >= min_span_deg_;
   }
   return free_locked_ != 0 && static_cast<int>(h_.size()) >= min_n_ && rms_deg_ >= 0.0 &&
          rms_deg_ <= max_rms_deg_;
@@ -661,79 +596,6 @@ bool LocalRuneTracker::predict(double t_future, double *roll_out) const {
     const double p = lin_c_(1), q = lin_c_(2);
     *roll_out = wrapPi(sgn_ * (kMean - lock_a_) * tau + lin_c_(0) +
                        sgn_ * (p * (1.0 - std::cos(lock_w_ * tau)) + q * std::sin(lock_w_ * tau)));
-    return true;
-  }
-  if (mode_ == 1) {
-    const int p = static_cast<int>(ar_c_.size());
-    if (p == 0 || static_cast<int>(h_.size()) < p + 1) return false;
-    std::vector<double> y;
-    for (const auto &s : h_) y.push_back(s.roll);
-    int steps = static_cast<int>(std::lround((t_future - h_.back().t) / dt));
-    if (steps < 0 || steps > 60) return false;
-    for (int k = 0; k < steps; ++k) {
-      double pr = 0.0;
-      for (int i = 0; i < p; ++i) pr += ar_c_[i] * y[y.size() - i - 1];
-      y.push_back(pr);
-    }
-    *roll_out = wrapPi(y.back());
-    return true;
-  }
-  if (mode_ == 5) {   // AR 裸预测
-    if (ar_c_.empty()) {   // 还没有系数 -> 等速外推（保证一定给得出结果）
-      if (h_.size() < 2) return false;
-      const auto &s1 = h_[h_.size() - 1];
-      const auto &s0 = h_[h_.size() - 2];
-      const double v = (s1.roll - s0.roll) / std::max(1e-6, s1.t - s0.t);
-      *roll_out = wrapPi(s1.roll + v * (t_future - s1.t));
-      return true;
-    }
-    // 以下为你指定参数范围隐含的唯一约束 = 你给的两条参数范围隐含的 |v| <= 2.090 rad/s
-    const int p5 = static_cast<int>(ar_c_.size());
-    if (p5 == 0 || static_cast<int>(h_.size()) < p5 + 1) return false;
-    std::vector<double> y;
-    for (const auto &s5 : h_) y.push_back(s5.roll);
-    int steps5 = static_cast<int>(std::lround((t_future - h_.back().t) / dt));
-    if (steps5 < 0 || steps5 > 60) return false;
-    const double max_step5 = kMaxSpeed * dt;   // 2.090 rad/s * dt
-    for (int k = 0; k < steps5; ++k) {
-      double pr = 0.0;
-      for (int i = 0; i < p5; ++i) pr += ar_c_[i] * y[y.size() - i - 1];
-      const double prev = y.back();
-      double d = pr - prev;
-      if (d > max_step5) d = max_step5;        // ← 只这一条，别的都不要
-      if (d < -max_step5) d = -max_step5;
-      y.push_back(prev + d);
-    }
-    *roll_out = wrapPi(y.back());
-    return true;
-  }
-  if (mode_ == 4) {   // AR + 物理包络
-    const int p = static_cast<int>(ar_c_.size());
-    if (p == 0 || static_cast<int>(h_.size()) < p + 1) return false;
-    std::vector<double> y;
-    for (const auto &s : h_) y.push_back(s.roll);
-    int steps = static_cast<int>(std::lround((t_future - h_.back().t) / dt));
-    if (steps < 0 || steps > 60) return false;
-    const double max_step = kMaxSpeed * dt;      // ★ 绝对约束：单步最多走这么多
-    double sum_v = 0.0;
-    for (int k = 0; k < steps; ++k) {
-      double pr = 0.0;
-      for (int i = 0; i < p; ++i) pr += ar_c_[i] * y[y.size() - i - 1];
-      const double prev = y.back();
-      double d = pr - prev;
-      if (d > max_step) d = max_step;            // 夹住：瞬时角速度 <= 2.090 rad/s
-      if (d < -max_step) d = -max_step;
-      y.push_back(prev + d);
-      sum_v += d / dt;
-    }
-    // 平均角速度应落在 [2.090-1.045, 2.090-0.780]；越界说明 AR 在瞎走 -> 退回等速外推
-    const double mean_v = (steps > 0) ? sum_v / steps : 0.0;
-    if (steps > 0 && (mean_v < kMeanSpeedLo || mean_v > kMeanSpeedHi)) {
-      const double v = (mean_v > 0 ? kMeanSpeedHi : -kMeanSpeedHi) * (mean_v > 0 ? 1.0 : 1.0);
-      y.back() = wrapPi(h_.back().roll + (mean_v > 0 ? kMeanSpeedHi : -kMeanSpeedHi) * (steps * dt));
-      (void)v;
-    }
-    *roll_out = wrapPi(y.back());
     return true;
   }
   const double tau = t_future - free_t_ref_;
