@@ -57,8 +57,6 @@ void LocalRuneTracker::reset() {
   phys_valid_ = 0;
   sector_off_ = 0.0;
   ar_c_.clear();
-  ekf_init_ = 0;
-  ekf_rej_ = ekf_tot_ = ekf_miss_ = 0;
   lost_ = false;
   coasting_ = false;
 }
@@ -404,83 +402,6 @@ void LocalRuneTracker::fitAR() {
   }
 }
 
-// ======================= mode 2: EKF =======================
-bool LocalRuneTracker::ekfReady() const { return ekf_init_ != 0 && n() >= min_n_; }
-
-void LocalRuneTracker::ekfStep(double z) {
-  const double dt = meanDt();
-  auto speed = [](const double *x, double tau) {
-    return x[1] * std::sin(x[2] * tau + x[3]) + (kMean - x[1]);
-  };
-  if (!ekf_init_) {
-    ex_[0] = z; ex_[1] = 0.9; ex_[2] = 1.94; ex_[3] = 0.0;
-    for (int i = 0; i < 4; ++i) for (int j = 0; j < 4; ++j) eP_[i][j] = 0.0;
-    eP_[0][0] = 4e-3; eP_[1][1] = 2e-2; eP_[2][2] = 3e-3; eP_[3][3] = 3.0;
-    ekf_init_ = 1;
-    etau_ = 0.0;
-    ekf_tot_++;
-    return;
-  }
-  // 过程噪声
-  const double qa = 1e-5, qw = 1e-6, qphi = 1e-5, qth = 5e-3;
-  // 雅可比（只有第一行非零）
-  const double s = std::sin(ex_[2] * etau_ + ex_[3]);
-  const double cc = std::cos(ex_[2] * etau_ + ex_[3]);
-  const double g[3] = {s - 1.0, ex_[1] * etau_ * cc, ex_[1] * cc};
-  double F[4][4] = {{0}};
-  for (int i = 0; i < 4; ++i) F[i][i] = 1.0;
-  F[0][1] = g[0] * dt; F[0][2] = g[1] * dt; F[0][3] = g[2] * dt;
-  double Q[4][4] = {{0}};
-  Q[0][0] = qth * dt; Q[1][1] = qa; Q[2][2] = qw; Q[3][3] = qphi;
-  // x' = x + f*dt
-  const double sp = speed(ex_, etau_);
-  ex_[0] += sp * dt;
-  // P' = F P F^T + Q
-  double FP[4][4] = {{0}}, Pn[4][4] = {{0}};
-  for (int i = 0; i < 4; ++i)
-    for (int j = 0; j < 4; ++j) {
-      double v = 0.0;
-      for (int k = 0; k < 4; ++k) v += F[i][k] * eP_[k][j];
-      FP[i][j] = v;
-    }
-  for (int i = 0; i < 4; ++i)
-    for (int j = 0; j < 4; ++j) {
-      double v = 0.0;
-      for (int k = 0; k < 4; ++k) v += FP[i][k] * F[j][k];
-      Pn[i][j] = v + Q[i][j];
-    }
-  for (int i = 0; i < 4; ++i) for (int j = 0; j < 4; ++j) eP_[i][j] = Pn[i][j];
-  // 创新门（带地板：按测量噪声而不是状态不确定度）
-  const double R = 1e-4, s_floor = 4e-3;
-  const double S = eP_[0][0] + R + s_floor;
-  const double nu = wrapPi(z - ex_[0]);
-  ekf_tot_++;
-  if (std::abs(nu) > 3.0 * std::sqrt(S)) {
-    ekf_rej_++;
-    ekf_miss_++;
-    etau_ += dt;
-    if (ekf_miss_ >= 12) {  // 连续拒太多 -> 只重设 theta
-      ex_[0] = z;
-      for (int i = 0; i < 4; ++i) for (int j = 0; j < 4; ++j) eP_[i][j] = 0.0;
-      eP_[0][0] = 4e-3; eP_[1][1] = 2e-2; eP_[2][2] = 3e-3; eP_[3][3] = 3.0;
-      ekf_miss_ = 0;
-    }
-    return;
-  }
-  ekf_miss_ = 0;
-  double K[4];
-  for (int i = 0; i < 4; ++i) K[i] = eP_[i][0] / S;
-  for (int i = 0; i < 4; ++i) ex_[i] += K[i] * nu;
-  for (int i = 0; i < 4; ++i)
-    for (int j = 0; j < 4; ++j) eP_[i][j] -= K[i] * eP_[0][j];
-  ex_[1] = std::min(kAHi, std::max(kALo, ex_[1]));
-  ex_[2] = std::min(kWHi, std::max(kWLo, ex_[2]));
-  etau_ += dt;
-  omega_ = ex_[2];
-  amp_ = ex_[1];
-  v_now_ = speed(ex_, etau_);
-}
-
 // ======================= push / ready / predict =======================
 void LocalRuneTracker::push(double t, double roll) {
   // ★ 用户思路：如果连续 hit_s_ 秒都没有进入空窗（一直没有 det==0），
@@ -676,8 +597,6 @@ void LocalRuneTracker::push(double t, double roll) {
     physFit();
   } else if (mode_ == 1 || mode_ == 4) {   // AR / AR+包络
     fitAR();
-  } else if (mode_ == 2) {                 // EKF
-    ekfStep(unwrapped);
   } else {                                 // free linear sine
     Eigen::Vector4d c;
     double w = 0, tr = 0;
@@ -716,9 +635,6 @@ bool LocalRuneTracker::ready() const {
                       // 安全性由 predict() 里的"速度不超过 2.090 rad/s"保证
     return static_cast<int>(ar_c_.size()) > 0 && static_cast<int>(h_.size()) >= min_n_ &&
            span_deg_ >= min_span_deg_;
-  }
-  if (mode_ == 2) {
-    return ekfReady();
   }
   return free_locked_ != 0 && static_cast<int>(h_.size()) >= min_n_ && rms_deg_ >= 0.0 &&
          rms_deg_ <= max_rms_deg_;
@@ -818,18 +734,6 @@ bool LocalRuneTracker::predict(double t_future, double *roll_out) const {
       (void)v;
     }
     *roll_out = wrapPi(y.back());
-    return true;
-  }
-  if (mode_ == 2) {
-    int steps = static_cast<int>(std::lround((t_future - h_.back().t) / dt));
-    if (steps < 0 || steps > 60) return false;
-    double x[4] = {ex_[0], ex_[1], ex_[2], ex_[3]};
-    double tau = etau_;
-    for (int k = 0; k < steps; ++k) {
-      x[0] += (x[1] * std::sin(x[2] * tau + x[3]) + (kMean - x[1])) * dt;
-      tau += dt;
-    }
-    *roll_out = wrapPi(x[0]);
     return true;
   }
   const double tau = t_future - free_t_ref_;

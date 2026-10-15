@@ -50,7 +50,6 @@ class LocalRuneTracker {
   bool locked() const { return locked_ != 0; }
   double rms_deg() const { return rms_deg_; }
   double span_deg() const { return span_deg_; }
-  int ekf_rej() const { return ekf_rej_; }
   int phys_rej() const { return phys_rej_; }
   int phys_heal() const { return phys_heal_; }   // ★ 坏窗自愈触发次数（累计）
   int sector_switch() const { return sector_switch_; }
@@ -81,7 +80,6 @@ class LocalRuneTracker {
   }
   bool lost_reported() const { return lost_reported_; }
   bool coasting() const { return coasting_; }
-  int ekf_tot() const { return ekf_tot_; }
 
   void set_window(int n) { win_ = n; }
   void set_min_samples(int n) { min_n_ = n; }
@@ -123,10 +121,6 @@ class LocalRuneTracker {
 
   // --- mode 1: AR ---
   void fitAR();  // 更新 ar_c_
-
-  // --- mode 2: EKF（手写 4x4）---
-  void ekfStep(double z);
-  bool ekfReady() const;
 
   std::deque<Sample> h_;
   double last_raw_ = 0.0;
@@ -204,12 +198,4 @@ class LocalRuneTracker {
   int ar_p_ = 4;
   std::deque<double> ar_c_;
 
-  // EKF: x = [theta, a, w, phi]
-  double ex_[4] = {0, 0.9, 1.94, 0.0};
-  double eP_[4][4] = {{0}};
-  double etau_ = 0.0;
-  int ekf_init_ = 0;
-  int ekf_rej_ = 0;
-  int ekf_tot_ = 0;
-  int ekf_miss_ = 0;
 };
