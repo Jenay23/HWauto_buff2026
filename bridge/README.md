@@ -813,8 +813,8 @@ bridge/
 ├── src/
 │   ├── main.cpp               # Zenoh 收发 + 最新帧邮箱 + replay/capture/selftest + 日志
 │   ├── hw26_pipeline.hpp/.cpp # OpenVINO 推理 + 双靶标 + PnP + 坐标变换 + 瞄准 + 弹道 + 开火
-│   └── local_tracker.hpp/.cpp # 桥自己的局部相位 tracker（local_model 0–6）
-├── tools/                     # 24 个 Python + 1 个 shell + 2 个 C++ 探针，索引见 §8.1
+│   └── local_tracker.hpp/.cpp # 桥自己的局部相位 tracker（local_model，本分支只剩 7）
+├── tools/                     # 13 个 Python + 1 个 shell + 2 个 C++ 探针，索引见 §8.1
 ├── logs/                      # record.sh 的产物（gitignore）
 └── 运行产物（全部 gitignore）
     ├── hw26_bridge_log.csv            # 逐帧日志（每次运行截断重写）
@@ -822,18 +822,22 @@ bridge/
     └── <同名>.rtstat.csv               # rt/stat 命中率（真命中 hits / 发弹数）
 ```
 
-### 8.1 `tools/` 索引（27 个）
+### 8.1 `tools/` 索引（16 个）
 
 | 组 | 脚本 | 用途 |
 |---|---|---|
 | 模型 | `convert_model.sh` | `buff.onnx` → OpenVINO IR（本桥在用的 `model/buff_ir.xml`） |
 | 连通 / 自检 | `zenoh_probe.cpp`、`phys_selftest.cpp` | 最小 Zenoh 探针（订阅 `rt/gimbal_pose`）；物理模型合成自检（真值 + 噪声 + 持续换支/翻转） |
-| 逐帧统计 | `csv_eval.py`、`dual_summary.py`、`anomaly_scan.py`、`dlt_seq.py`、`ch_vs_amp.py` | 读 `hw26_bridge_log.csv` / `[dual]` 行汇总；`dlt_seq` 看 `dlt` 跳变、`ch_vs_amp` 对比弦相位与振幅 |
-| 真值对比 | `aim_vs_truth.py`、`fit_vs_truth.py`、`fit_vs_truth_time.py`、`fit_deep.py`、`fit_eval.py`、`pred_eval.py`、`predictor_compare.py`、`true_params.py`、`true_delta.py`、`true_delta_runs.py`、`kpts_compare.py`、`rune_kpts_table.py` | 用 `rt/rune_kpts` 真值核对拟合参数 / 预测 / 两片夹角；`fit_vs_truth_time` 按 `true_a` 分段（每段 = 一次激活）；`rune_kpts_table.py` 直接从 `POWER.glb` 导出 FACE_1/FACE_2 真值 8 点 |
-| 坏窗 / 卡死诊断 | `badwin_probe.py`、`badwin_seq.py`、`badwin_after.py`、`heal_seq.py`、`stuck_scan.py` | 找连续坏窗、自愈（`heal`）触发点、卡死段 |
-| 节拍 / 命中 | `fire_interval.py`、`hit_multi.py` | `launch` 阶跃 → 实际开火间隔；多次运行的"发弹 − 命中"汇总 |
+| 逐帧统计 | `csv_eval.py`、`dual_summary.py`、`ch_vs_amp.py` | 读 `hw26_bridge_log.csv` / `[dual]` 行汇总；`ch_vs_amp` 对比弦相位与振幅 |
+| 真值对比 | `aim_vs_truth.py`、`fit_vs_truth.py`、`fit_vs_truth_time.py`、`fit_deep.py`、`fit_eval.py`、`pred_eval.py`、`predictor_compare.py`、`true_params.py`、`kpts_compare.py`、`rune_kpts_table.py` | 用 `rt/rune_kpts` 真值核对拟合参数 / 预测；`fit_vs_truth_time` 按 `true_a` 分段（每段 = 一次激活）；`rune_kpts_table.py` 直接从 `POWER.glb` 导出 FACE_1/FACE_2 真值 8 点 |
 
 > 每个脚本的详细用法看它文件头注释或 `--help`；本表只做"用哪个"的索引。
+>
+> 曾经还有 11 个**一次性分析脚本**（`anomaly_scan` / `badwin_probe` / `badwin_seq` / `badwin_after` /
+> `heal_seq` / `stuck_scan` / `dlt_seq` / `fire_interval` / `hit_multi` / `true_delta` / `true_delta_runs`），
+> 它们把某次运行的日志路径**写死在源码里**（例：`badwin_probe.py` 直接 `open("logs/20261014_222230_fps.log")`），
+> 换一次运行就跑不出东西 —— **已于 2026-10-16 删除**（见 §10）。需要时从本提交之前的历史取回：
+> `git show 6bc6b01:bridge/tools/badwin_probe.py`。
 
 工作区根目录还有一套**独立的**遥测工具（不属本仓库）：`tools/telemetry.cpp`、
 `tools/analyze.py`、`tools/run_session.sh` —— 录模拟器侧真值并出抖动/命中报告，
@@ -881,6 +885,7 @@ bridge/
 
 | 日期 | 变更 |
 |---|---|
+| 2026-10-16 | 删掉 `tools/` 里 11 个**一次性分析脚本**（`anomaly_scan` / `badwin_probe` / `badwin_seq` / `badwin_after` / `heal_seq` / `stuck_scan` / `dlt_seq` / `fire_interval` / `hit_multi` / `true_delta` / `true_delta_runs`）：日志路径写死在源码里，只对某一次运行有意义；要复现从 `6bc6b01` 之前的历史取 |
 | 2026-10-16 | **`bridge/prune`：死代码清理 5 步**（本分支）—— Part 1/5 删 EKF(mode 2)；Part 2/5 删 AR(modes 1/4/5)；Part 3+4/5 删 modes 0/3/6(csine / free / table+coast)；Part 5/5 删弦相位 + **全部绘制**。`local_tracker.cpp` 从 ~800 行降到 ~300 行，`local_model` 现在只有 7 一条实现；经查 `aim_local_only` **不是**死代码，保留（`414e858` / `d6efe46` / `56c916f` / `5833d1e`） |
 | 2026-10-16 | 清理 `tools/` 里 7 个死路脚本（`aim_accuracy*.py` / `aim_sample.py` / `aim_uv.py` / `fly_sensitivity.py` / `lead_sweep.py` / `ts_overlap.py`），本文件 §8 同步（`84dda5a`） |
 | 2026-10-15 | `fix` **span 物理不可能时就地清窗**：原来只置 `phys_valid_=0` 就 `return`，坏样本仍留在窗口里 → `ready()` 永久为假（表现是"rms 很小却卡死"）；现在直接清窗重自举。另：`fire_cooldown` 默认值对齐 `0.1`（hpp / main.cpp 解析默认）、`.gitignore` 补 `*.csv`/`*.jsonl`（`cba0eef` / `008819e` / `7efabdf`） |
