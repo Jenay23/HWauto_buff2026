@@ -203,7 +203,6 @@ struct Pipeline::Impl {
   double prev_t_rel = 0.0;
   Eigen::Vector3f aim_ch_abs = Eigen::Vector3f::Zero();  // 未来打击点（车体系，绝对）
   bool aim_ch_valid = false;
-  std::vector<cv::Point2f> ext_kpts;   // 合成自检用：外部喂的关键点
   std::vector<cv::Point2f> last_kpt;   // 本帧检测到的关键点（可视化）
   bool have_rcenter = false;
   bool have_rcenter_rough = false;
@@ -370,8 +369,6 @@ Pipeline::~Pipeline() = default;
 
 const Config &Pipeline::config() const { return impl_->cfg; }
 
-void Pipeline::set_external_kpts(const std::vector<cv::Point2f> &kpts) { impl_->ext_kpts = kpts; }
-void Pipeline::clear_external_kpts() { impl_->ext_kpts.clear(); }
 
 int Pipeline::self_test_image(const cv::Mat &bgr) {
   auto &I = *impl_;
@@ -687,26 +684,6 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
     return p;
   };
 
-  {
-  // 外部注入的关键点（调试钩子 set_external_kpts；仓库内当前没有调用点）。
-  if (I.ext_kpts.size() >= 6) {
-    const cv::Point2f &pt = I.ext_kpts[0];
-    const cv::Point2f &pl = I.ext_kpts[1];
-    const cv::Point2f &pb = I.ext_kpts[2];
-    const cv::Point2f &pr = I.ext_kpts[3];
-    for (const auto &q : I.ext_kpts) I.last_kpt.push_back(q);
-    if (const auto pose = solve_pose_ippe(pt, pl, pb, pr)) poses.push_back(*pose);
-    DetInfo di;
-    di.color = I.cfg.buff_color;
-    di.label = 0;
-    di.confidence = 1.0f;
-    di.cx = pt.x;
-    di.cy = pt.y;
-    out.dets.push_back(di);
-    out.n_det = 1;
-    out.n_selected = 1;
-    out.max_score = 1.0f;
-  } else {
   const auto detected = Impl::detect_blades(I, bgr, out);
 
   // 4) 目标筛选
@@ -896,8 +873,6 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
         pose_src.push_back(cand_src[k]);
       }
     }
-  }
-  }  // end if ext_kpts ... else（合成自检 vs 真实推理）
   }
 
   // 6-pre) 把本帧解出的位姿存成"上一帧位姿"，供下一帧的双解连续性使用。

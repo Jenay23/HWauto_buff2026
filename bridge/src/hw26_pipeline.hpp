@@ -355,10 +355,6 @@ class Pipeline {
   // 自检：对单张 BGR 图跑一次检测，返回检测数（不做跟踪/瞄准）
   int self_test_image(const cv::Mat &bgr);
 
-  // 合成自检用：直接喂 6 个关键点（图像坐标），绕过检测器。传空则恢复用检测器。
-  void set_external_kpts(const std::vector<cv::Point2f> &kpts);
-  void clear_external_kpts();
-
   const Config &config() const;
 
  private:
