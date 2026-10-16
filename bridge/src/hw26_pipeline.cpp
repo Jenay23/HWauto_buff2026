@@ -443,6 +443,11 @@ struct Pipeline::Impl {
   int frame_count = 0;
   double last_fire_t = -1e9;
   int align_run = 0;
+  /// 锁存的旋向（+1 = 相位递增，-1 = 递减，0 = 还没判出来）。只用来决定
+  /// A/橙 是谁，不参与任何滤波/预测。
+  double dir_sgn = 0.0;
+  /// 锁定期到什么时候（图像时间轴）；判准一次后到点前不再重新判。
+  double dir_lock_until_t = -1e18;
   double last_latency_ms = 0.0;
   std::ofstream log;
   cv::FileStorage tracker_fs;
@@ -1242,16 +1247,39 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
     out.meas_a_ch = obs2ch_v(use_a.translation);  // 1 号实测板心（车体系）
     if (I.cfg.dual_target && have_b) {
       const Pose3f use2 = use_b;
-      // ★ 组号必须【稳定】：按 wrap 之后的相位先后决定谁是 1 号，而不是按置信度。
+      // ★ 组号必须【稳定】：按【旋向】决定谁是 1 号（A/橙），而不是按置信度。
       //   按置信度排的话，两片置信度互相超过时（0.91 <-> 0.89）黄/品红会来回换 ——
-      //   这是实测看到的现象。相位差是常数，所以 wrap 后的先后是稳定的。
+      //   这是实测看到的现象。
+      //
+      // ★★ 谁是 A(橙) 必须跟着【旋向】走，并且锁存 ★★
+      //   新模拟器（Reborn27）的符旋向【每次启动 50/50 随机】，而老模拟器是固定的
+      //   （FACE_2 恒 clockwise=false = 视觉逆时针）。所以这条判据必须显式写。
+      //   2026-10-16 实测标定（视觉 vs 桥观测）：
+      //     符视觉【顺时针】 -> 桥看到 roll 递增 -> dir_sgn = +1 -> A(橙) 取相位【大】者
+      //     符视觉【逆时针】 -> roll 递减         -> dir_sgn = -1 -> A(橙) 取相位【小】者
+      //   注意与"顺着旋向找后面那片"的直觉相反 —— 原因是符面系的法向朝向相机，
+      //   视角方向与 roll 的正向相反，所以"反着旋向取相位靠前"在数值上就是取大。
+      //   判据：局部 tracker ready 且窗口跨度 >= 45deg 才判一次（宁可不判也不错判），
+      //   判准后锁 cfg.dir_lock_s 秒（默认 420s = 7 分钟），锁定期内绝不翻转
+      //   -> 治起始阶段"橙/蓝跳变"。还没判出来时按 dir=-1（逆时针 = 老模拟器那条
+      //   路径）处理，所以老模拟器的行为一个字节不变。
+      if (t_rel > I.dir_lock_until_t && I.local_trk.ready() &&
+          I.local_trk.span_deg() >= 45.0) {
+        I.dir_sgn = (I.local_trk.sgn() >= 0.0) ? 1.0 : -1.0;
+        I.dir_lock_until_t = t_rel + I.cfg.dir_lock_s;
+      }
+      const bool want_larger = (I.dir_sgn > 0.0);
       Buff A = obs;
       Buff B(use2);
       bool pose0_is_a = true;
-      if (wrap_pi(static_cast<double>(B.roll) - static_cast<double>(A.roll)) < 0.0) {
+      const double roll_delta = wrap_pi(static_cast<double>(B.roll) - static_cast<double>(A.roll));
+      // 当前 A=obs：roll_delta > 0 表示 A 的相位更小
+      const bool a_is_larger = (roll_delta < 0.0);
+      if (a_is_larger != want_larger) {
         std::swap(A, B);
         pose0_is_a = false;
       }
+      out.dbg_dir_sgn = (I.dir_sgn > 0.0) ? 1 : ((I.dir_sgn < 0.0) ? -1 : 0);
       const std::size_t src_a = pose_src.size() >= 2
                                     ? (pose0_is_a ? pose_src[0] : pose_src[1])
                                     : 0;

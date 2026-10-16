@@ -54,6 +54,19 @@ class LocalRuneTracker {
   bool locked() const { return locked_ != 0; }
   double rms_deg() const { return rms_deg_; }
   double span_deg() const { return span_deg_; }
+  /// 旋向符号：+1 = 相位递增(ω>0)，-1 = 递减。用于判定谁是 A(橙)（§1.8）。
+  ///
+  /// 优先用【窗口内相位的净变化】（解缠后的 roll，跟模型无关、不会陈旧）；
+  /// 跨度太小时才退回物理拟合出的符号 phys_sgn_。
+  double sgn() const {
+    if (h_.size() >= 2) {
+      const double delta = h_.back().roll - h_.front().roll;
+      if (std::abs(delta) > 20.0 * 3.14159265358979323846 / 180.0) {
+        return delta > 0.0 ? 1.0 : -1.0;
+      }
+    }
+    return phys_sgn_;
+  }
   int phys_rej() const { return phys_rej_; }
   int phys_heal() const { return phys_heal_; }   // ★ 坏窗自愈触发次数（累计）
   int sector_switch() const { return sector_switch_; }

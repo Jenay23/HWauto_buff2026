@@ -392,6 +392,8 @@ bc.algo.num_reverse = static_cast<int>(fs.getd("num_reverse", bc.algo.num_revers
   bc.algo.local_model =
       static_cast<int>(fs.getd("local_model", bc.algo.local_model));
   bc.algo.local_rms_gate_deg = fs.getd("local_rms_gate_deg", bc.algo.local_rms_gate_deg);
+  // A/橙 身份（由旋向决定）判准后锁定多久（秒）；默认 420 = 7 分钟
+  bc.algo.dir_lock_s = fs.getd("dir_lock_s", bc.algo.dir_lock_s);
   bc.algo.local_bad_rms_deg = fs.getd("local_bad_rms_deg", bc.algo.local_bad_rms_deg);
   bc.algo.local_coast_s = fs.getd("local_coast_s", bc.algo.local_coast_s);
   bc.algo.center_source = static_cast<int>(fs.getd("center_source", bc.algo.center_source));
@@ -1254,13 +1256,14 @@ int main(int argc, char **argv) {
             "[dual] droll=(%.1f,%.1f)deg pick=(%d,%d) dres=%.1fdeg chord=%.3fm "
             "rcd=%.2fm dlt=%.0f cand=(%.0f,%.0f)px | ctr=%d n=%d rms=%.3fm | local n=%d rdy=%d "
             "rms=%.1fdeg span=%.0fdeg w=%.2f LK=%d om=%.3f A=%.3f drop=%d lost=%d hit=%d "
-            "theta=%.3f ch=%d rej=%d heal=%d\n",
+            "theta=%.3f ch=%d rej=%d heal=%d dir=%d\n",
             out.droll_deg[0], out.droll_deg[1], out.sol_pick_t[0], out.sol_pick_t[1],
             out.dual_resid_deg, out.chord_m, out.dual_rcd_m, out.dual_delta_deg, out.cand_px[0],
             out.cand_px[1], out.center_src, out.center_n, out.center_rms_m, out.local_n,
             out.local_ready, out.local_rms_deg, out.local_span_deg, out.local_w, out.local_locked, out.local_omega,
             out.local_amp, out.local_drop, out.local_lost, out.local_hit,
-            out.local_theta, out.local_chord, out.local_phys_rej, out.local_phys_heal);
+            out.local_theta, out.local_chord, out.local_phys_rej, out.local_phys_heal,
+            out.dbg_dir_sgn);
         std::fflush(stdout);
       }
       // 单片时的圆心诊断（大符只检出一片、或小符）：[dual] 行不会打印
