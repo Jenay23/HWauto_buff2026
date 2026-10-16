@@ -49,6 +49,22 @@ class LocalRuneTracker {
   double amp() const { return amp_; }       // csine: 拟合的 a；EKF: 状态里的 a
   bool locked() const { return locked_ != 0; }
   double rms_deg() const { return rms_deg_; }
+  /// 旋向符号：+1 = 相位递增(ω>0)，-1 = 递减。用于判定"先被打到的那片"。
+  ///
+  /// ★ 不能用 sgn_：那个只在 mode 0(csine) 里更新，local_model=7(phys LM) 走的是
+  ///   phys_sgn_，于是 sgn_ 会一直停在初值 1.0 —— 表现就是"旋向判据永远不翻"。
+  ///   这里优先用【窗口内相位的净变化】（解缠后的 roll，跟模型无关、不会陈旧），
+  ///   跨度太小时才退回模型拟合出的符号。
+  double sgn() const {
+    if (h_.size() >= 2) {
+      const double delta = h_.back().roll - h_.front().roll;
+      if (std::abs(delta) > 20.0 * 3.14159265358979323846 / 180.0) {
+        return delta > 0.0 ? 1.0 : -1.0;
+      }
+    }
+    if (phys_valid_ != 0) return phys_sgn_;
+    return sgn_;
+  }
   double span_deg() const { return span_deg_; }
   int ekf_rej() const { return ekf_rej_; }
   int phys_rej() const { return phys_rej_; }

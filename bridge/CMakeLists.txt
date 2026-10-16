@@ -24,7 +24,6 @@ find_package(OpenVINO REQUIRED)
 
 # Zenoh C：优先 pkg-config
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(ZENOHC REQUIRED zenohc)
 
 # ---- HWauto_buff2026 源码根 ----
 # bridge/ 就在 HWauto_buff2026 根目录下，所以源码根默认是上一级；可用 -DHW26_ROOT=... 覆盖
@@ -52,6 +51,7 @@ set(HW26_SOURCES
 
 add_executable(hw26_sim_bridge
   src/main.cpp
+  src/reborn_io.cpp
   src/hw26_pipeline.cpp
   src/local_tracker.cpp
   ${HW26_SOURCES}
@@ -60,27 +60,17 @@ target_include_directories(hw26_sim_bridge PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${HW26_ROOT}/include
   ${OpenCV_INCLUDE_DIRS}
-  ${ZENOHC_INCLUDE_DIRS}
 )
 target_link_libraries(hw26_sim_bridge PRIVATE
   ${OpenCV_LIBS}
   openvino::runtime
   Eigen3::Eigen
-  ${ZENOHC_LIBRARIES}
   pthread
 )
-target_link_directories(hw26_sim_bridge PRIVATE ${ZENOHC_LIBRARY_DIRS})
 target_compile_options(hw26_sim_bridge PRIVATE -O2 -w)
 
-# 便于直接运行：把 rpath 指到 OpenVINO 与 Zenoh 的库目录
+# 便于直接运行：把 rpath 指到 OpenVINO 的库目录
 set_target_properties(hw26_sim_bridge PROPERTIES
-  BUILD_RPATH "${OPENVINO_ROOT}/runtime/lib/intel64;${ZENOHC_LIBRARY_DIRS}"
+  BUILD_RPATH "${OPENVINO_ROOT}/runtime/lib/intel64"
   INSTALL_RPATH "${OPENVINO_ROOT}/runtime/lib/intel64"
 )
-
-# 附带的 Zenoh 连通性探针（README 里会用到 ./build/zenoh_probe）
-add_executable(zenoh_probe tools/zenoh_probe.cpp)
-target_include_directories(zenoh_probe PRIVATE ${ZENOHC_INCLUDE_DIRS})
-target_link_libraries(zenoh_probe PRIVATE ${ZENOHC_LIBRARIES} pthread)
-target_link_directories(zenoh_probe PRIVATE ${ZENOHC_LIBRARY_DIRS})
-target_compile_options(zenoh_probe PRIVATE -w)

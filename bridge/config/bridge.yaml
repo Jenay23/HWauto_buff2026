@@ -1,4 +1,4 @@
-# hw26_sim_bridge 配置 — Daedalus 模拟器
+# hw26_sim_bridge 配置 — Daedalus 模拟器 (bevy_robomaster_simulator)
 # 运行时可被 --config 覆盖；所有 path 建议写绝对路径
 
 # ===================== 检测器 =====================
@@ -12,7 +12,10 @@
 # 模型能正常检出（点亮的大符帧上给出 2 个候选），所以切回 HW26 自己的模型。
 # sp25 的检测代码已删除；model/ 里的 yolo11_buff_int8.* 仅留档，换过去会崩。
 model: "../model/buff_ir.xml"  # HW26（9 关键点）
-device: "GPU"                  # 推理设备 CPU/GPU/AUTO/NPU（编译失败会自动回退 CPU）
+device: "GPU"                  # 换回 GPU（推理 ~20ms -> 处理率翻倍）。代价：和模拟器渲染
+                               # 抢同一块 iGPU，看 sim 那行 requested/submitted 会不会掉。
+                               # 若掉了明显，就回到 "CPU" 或改 "AUTO"。
+                               # （当初改 CPU 是为了绕开模拟器的 WC 回读 bug，那个已修）
 
 # 打击板四点的半边长（相对扇叶中心），(0,0,±h),(0,±h,0)。
 # 走桥自实现的 PnP，不调用 HW26 的 Solver（它的 BUFF_POINTS = 0.114 是实车靶板
@@ -30,8 +33,22 @@ blade_half_size_hw26: 0.093  # ★ 当前生效值（实测 PnP 测距 ≈6.9~7.
 # 模拟器给的枪口补偿（POWER_RUNE_INTERFACE.md:105，实测外参）：
 #   枪口相对相机光心，云台系(X前 Y左 Z上)：前 73.83mm、右 1.08mm、下 28.48mm
 #   （历史备注：早期口径曾漏掉这项，现已补上）
+# ★ 新模拟器(bevy，Reborn27 通道)实测值：从 vehicle.glb 的 CAM_DIRECTION 与
+#   SHOT_DIRECTION 挂点算得（枪口系 X前 Y左 Z上）：
+#   枪口相对相机 = 前 -49.32mm（相机反而更靠前）、左 +0.19mm、上 -86.05mm。
+#   与旧模拟器那组 (73.83, -1.08, -28.48) 完全不是一回事：模型换了，且旧值是在
+#   云台系 + 20° 枪管上仰下量的。换模型/换挂点必须重量，用 aim_vs_truth.py 校。
+# ★ 相机光轴相对【姿态系】的固定上仰角（度）—— 必须与姿态发布的是哪个系配套：
+#   旧模拟器 at_vision_simulator：rt/gimbal_pose 发【云台系】，相机与枪管平行、比云台高 20° -> 20.0
+#   新模拟器 bevy/Reborn27：SP 遥测发【枪口系】，相机与枪口同轴 -> 0.0
+#   填错的表现：目标在姿态系里整体抬高/压低这个角度 -> 指令高/低 20° -> 直接飞出画面
+camera_mount_pitch_deg: 0.0
+# 旋向（决定 A/橙 取相位大者还是小者）判准一次后锁定多久，单位秒。
+# 起始阶段 tracker 窗口短、符号会来回翻 -> 橙/蓝跳变，所以必须锁。
+# 420 = 7 分钟（按要求）；到期后允许重新判定，换符/方向反转时会重新锁。
+dir_lock_s: 420.0
 use_muzzle_offset: 1
-muzzle_offset: [0.07383008, -0.00108151, -0.02848256]
+muzzle_offset: [-0.049320, 0.000186, -0.086054]
 
 # ---- 相机内参（对齐实车 CS016 + 6mm 镜头；1440x1080, 零畸变）----
 #   fx = fy = 6.00mm / 3.45um = 1739.1     fov_y = 34.5°, fov_x = 44.98°
@@ -58,15 +75,17 @@ distort_coeffs: [0.0, 0.0, 0.0, 0.0, 0.0]
 # 注意 RuneTeam 是死代码（pub _team，代码里从不读取），颜色完全由 GLB 材质决定，
 # 无法从源码推断，只能实测。
 #
-# 实测（2026-10，HW26 后端 = 模型自己分类）：
-#   大符 FACE_2，车在 (5,1,5) -> 模型报 color=1 (RED)、label=0 (INACTIVATE)
-#   -> 所以 my_color 必须是 1，否则 filter_color 会把检出全部拒掉（n_sel 恒为 0）
-#   小符 FACE_1 的分类尚未实测（早先日志里的 c=0(BLUE) 是旧单类模型下桥强制的
-#   配置值，不是模型的判断，不能作为依据）
+# 实测（2026-10，旧模拟器 at_vision_simulator，HW26 后端 = 模型自己分类）：
+#   大符 FACE_2，车在 (5,1,5) -> 模型报 color=1 (RED)
+#   -> 当时 my_color 必须是 1，否则 filter_color 会把检出全部拒掉（n_sel 恒为 0）
 #
-# 2026-10: 模拟器已把 LocalInfantry 移到 (5,1,5) 打大符，故此处切到 mode: 2
+# ★ 换到 bevy_robomaster_simulator（Reborn27 通道）后重测（2026-10-16）：
+#   大符 FACE_2，车在 (5.594,5.529) -> 模型报 color=0 (BLUE)，conf 0.78~0.88。
+#   与 GLB 材质一致：新模拟器的 POWER.glb 里 FACE_2 = BLUE_EMISSION、FACE_1 =
+#   RED_EMISSION；而旧模拟器那份 POWER.glb 两个面都是 RED_EMISSION。
+#   -> 新模拟器上打大符必须 my_color: 0。换成小符(FACE_1,红)时才用 1。
 mode: 2
-my_color: 1
+my_color: 0
 
 confidence_threshold: 0.5
 
@@ -159,11 +178,15 @@ pos_gate_m: 0.12          # 位置内点门：喂相位前用圆再判一次 | |
 center_hist_keep_s: 8.0   # 历史只保留最近这么久（圆心静止，只为限内存）
 
 # ---- 弹道 / 瞄准 ----
-bullet_speed: 22.0          # 模拟器弹速 m/s
+bullet_speed: 25.0          # ★ 新模拟器 config.toml [projectile] speed = 25.0（旧模拟器是 22.0）
+                            #   附带：[projectile] cooldown = 0.05s，比本桥的 fire_cooldown(0.1s) 还小，
+                            #   所以现在【桥】是开火节拍的限制者；要对齐旧基线就把模拟器冷却改成 ~0.83s
 gravity: 9.81
 yaw_offset_deg: 0.0
-pitch_offset_deg: -20.0     # 抵消枪管相对云台固定上仰 20deg（模拟器 POWER_RUNE_INTERFACE.md）
-predict_time: 0.10          # 额外提前量 s
+pitch_offset_deg: 0.0       # ★ Reborn27 的姿态与指令【都是枪口系】，模拟器内部已抵消枪管↔云台，
+                            #   桥里不能再叠 20°（旧模拟器的 rt/gimbal_pose 才是云台系）
+predict_time: 0.10          # 额外提前量 s（原值）。采集链路修好后 age 只有 50~75ms，
+                            #   不需要再补延迟；补大了局部模型外推不动 -> aim_valid=0 -> 不发指令
 gimbal_lead_time: 0.0        # ★ 仿真云台极快（18 rad/s），实车那种滞后补偿在仿真里只会让瞄准偏
                             # 预测时间会加这么多，让命令提前于目标。
                             # 依据：稳定跟踪时看 [bridge] 行的 err=，滞后 ≈ err/13 度每秒。
@@ -178,15 +201,15 @@ fire_enabled: 1
 fire_err_rad: 0.08           # 云台到位门(~4.6°)。原 3.20=不检查 -> 开火时刻由模拟器
                              # 1.0s 冷却到期决定，桥的对准判定形同虚设 -> 大量空单。
 fire_stable_frames: 2        # 连续 2 帧到位才打
-fire_cooldown: 0.10          # 桥的"敲门"节流（10Hz）。它必须【小于】模拟器冷却，
-                             # 让模拟器成为唯一限制项；等于冷却值时一帧抖动就会丢机会、
-                             # 节拍会在 1.2Hz 和 0.6Hz 之间跳。
-                             # 当前模拟器：sim/fire-1p2hz 分支，冷却 = 1/1.2 s（1.2 发/秒）。
+fire_cooldown: 0.6667        # ★ 桥侧强制 1.5 发/秒（= 1/1.5 s）。原本写的是 1/1.2 s，按要求改成 1.5Hz。
+                             #   注意：新模拟器自己的 [projectile] cooldown = 0.05s(20Hz)，
+                             #   所以现在【桥是唯一的节拍限制者】，不会出现两个限制打架。
+                             #   想要新模拟器的原生射速就把这里改回 0.10（或更小）。
 # ★ 开火纪律：只在"预测可信"时才允许 fire=true（治"已经打中了又打"）。
 #   命中后换组 -> 模型门连续拒绝 -> reset -> local_ready=0 -> 自动停火等重锁。
 fire_require_lock: 1
 # 瞄准预测来源：本地 mode7 模型 ready 时只用它（HW26 predictor 实测会转圈）。默认 1。
-aim_local_only: 1
+aim_local_only: 1            # 恢复本来的策略：本地模型 ready 才出瞄准（现在它稳了）
 fire_rms_gate_deg: 15        # 局部模型拟合 rms 上限（度）
 fire_min_n: 15               # 局部模型最少样本数
 
@@ -217,13 +240,13 @@ face_lock_frames: 120
 max_slew_deg_s: 600.0         # ★ 仿真云台 GIMBAL_CONTROL_SPEED=18 rad/s(≈1031deg/s)；原 40deg/s 是实车安全限制，仿真里只会让云台跟不上
 cmd_smooth_alpha: 0.5
 max_aim_step_px: 400.0
-stale_ms: 200.0
+stale_ms: 200.0         # 图像过期门（原值）。现在 age 50~75ms，200 足够
 
-# ★ 实验分支 bridge/fps：强制关可视化，量化"帧率能提到多少"。
-#   原因：visualize=1 时每帧都要 1) 构建 1440x1080 调试图 2) imshow + waitKey(1)，
-#   推理本身 p50 只有 23 ms，而实际帧率只有 25 Hz -> 可视化极可能是主瓶颈。
-#   代价：看不到紫点/绿点面板。测完切回 bridge/gt-kpts 即恢复。
-visualize: 0
+# ★ 恢复可视化（原来是 bridge/fps 实验分支为了量帧率关掉的）。
+#   现在调试图每帧反正都在构建（[stage] 的 draw 只占 0.2ms），imshow+waitKey 大约加
+#   几 ms；当前 20fps 是被 CPU 推理 49ms 卡住的，可视化不是瓶颈。
+#   若显示后掉到 15fps 以下，把下面 visualize_every 调成 2~3（每 N 帧画一次）。
+visualize: 1
 # Log every frame (not every 30th) so the CSV can be joined 1:1 with the
 # telemetry recorder's one-row-per-image-frame CSV on sim_t_ns.
 visualize_every: 1             # 显示节流：1=每帧都显示（面板 60Hz 时不要调大 ✗，否则画面掉到 1/N）
@@ -231,8 +254,11 @@ console_every: 10             # 屏幕打印节流（每 N 帧一行）；CSV �
 log_every: 1
 log_path: "hw26_bridge_log.csv"
 
-# ---- 话题 ----
-image_topic: "rt/image_raw"
-pose_topic: "rt/gimbal_pose"
-cmd_topic: "cmd/gimbal"
-max_image_age_ms: 300.0
+# ---- Reborn27 传输（取代 Zenoh）----
+# 模拟器侧：crates/reborn-bridge + docs/reborn.md。先起模拟器，再起本桥。
+# 相机走 Unix socket + mmap ring（BGR8，帧头自带 fx/fy/cx/cy）；
+# 云台走虚拟串口（43B 遥测 / 29B 指令），首次使用需 sudo python3 scripts/setup-virtual-gimbal.py。
+reborn_socket: "/tmp/reborn27-camera.sock"
+reborn_shm: "/dev/shm/reborn27-camera.ring"
+reborn_serial: "/dev/virtual_gimbal"
+max_image_age_ms: 300.0   # 与 stale_ms 取较小者 -> 实际 200ms（原值）

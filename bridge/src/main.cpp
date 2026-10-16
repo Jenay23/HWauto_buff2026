@@ -1,15 +1,15 @@
-// hw26_sim_bridge — 把 HWauto_buff2026 接到 Daedalus 模拟器
+// hw26_sim_bridge — 把 HWauto_buff2026 接到 Daedalus 模拟器（bevy_robomaster_simulator）
 //
-// 话题（与 at_vision_simulator/POWER_RUNE_INTERFACE.md 一致）：
-//   订阅 rt/image_raw   (BIMG 二进制: "BIMG"|i64 ns|u32 w|u32 h|RGB888)
-//   订阅 rt/gimbal_pose (JSON: {"yaw","pitch","roll"} 弧度)
-//   发布 cmd/gimbal     (JSON: {"yaw","pitch","roll","fire","control"})
+// 通道：模拟器自己的 Reborn27 传输，见 bevy_robomaster_simulator/docs/reborn.md
+//   相机  Unix socket 握手 (RBIP v2) + mmap ring，96B RBCAM v1 头 + BGR8，收完回 RBRA
+//   云台  虚拟串口 SP 协议，上行 43B 遥测 / 下行 29B 指令，CRC16 0x8408
+// 相机光轴与枪管严格同轴，姿态与指令都在【枪口系】(X前/Y左/Z上，pitch 下正)。
 //
 // 设计要点：
 //   * 图像用"只保留最新帧"的邮箱 + 工作线程，绝不排队（避免落后越积越多）
-//   * 图像线程与姿态线程各自独立 Zenoh session
+//   * 串口读线程独立，只保留最新一帧姿态
 //   * 支持 --capture 抓一帧存 PNG，--selftest 对静图跑检测（验证模型泛化性）
-#include <zenoh.h>
+#include "reborn_io.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -61,11 +61,9 @@ bool has_flag(int argc, char **argv, const std::string &key) {
 // ---------------- 配置 ----------------
 struct BridgeConfig {
   hw26_bridge::Config algo;
-  std::string image_topic = "rt/image_raw";
-  std::string pose_topic = "rt/gimbal_pose";
-  std::string cmd_topic = "cmd/gimbal";
-  std::string rune_kpts_topic = "rt/rune_kpts";   // 模拟器真值 8 点（只读订阅）
-  std::string rune_stat_topic = "rt/stat";        // 模拟器命中统计 {launch,accurate,pct}（只读）
+  std::string reborn_socket = "/tmp/reborn27-camera.sock";
+  std::string reborn_shm = "/dev/shm/reborn27-camera.ring";
+  std::string reborn_serial = "/dev/virtual_gimbal";
   double max_image_age_ms = 300.0;  // 超过则不发控制（保持云台）
 };
 
@@ -84,7 +82,11 @@ int run_selftest_aim(const BridgeConfig &bc) {
   // 云台系 -> 相机系：必须与管道内部用同一个来源（hw26_pipeline.hpp 的
   // gimbal_to_camera / R_camera2gimbal）。这里**故意不再手写公式**：
   // 若自检与管道用了不同的相机约定，自检会立刻报超差，正是我们要的交叉检查。
-  const auto g2c = [](const Vector3f &g) { return hw26_bridge::gimbal_to_camera(g); };
+  const float cam_pitch_rad =
+      static_cast<float>(bc.algo.camera_mount_pitch_deg * M_PI / 180.0);
+  const auto g2c = [cam_pitch_rad](const Vector3f &g) {
+    return hw26_bridge::gimbal_to_camera(g, cam_pitch_rad);
+  };
   const double fx = bc.algo.camera_matrix.at<double>(0, 0);
   const double fy = bc.algo.camera_matrix.at<double>(1, 1);
   const double ccx = bc.algo.camera_matrix.at<double>(0, 2);
@@ -404,6 +406,10 @@ bc.algo.num_reverse = static_cast<int>(fs.getd("num_reverse", bc.algo.num_revers
   bc.algo.gravity = fs.getd("gravity", 9.81);
   bc.algo.yaw_offset_deg = fs.getd("yaw_offset_deg", 0.0);
   bc.algo.pitch_offset_deg = fs.getd("pitch_offset_deg", -20.0);
+  // 相机光轴相对姿态系的固定上仰：旧模拟器(pose=云台系)=20，新模拟器(pose=枪口系)=0
+  bc.algo.camera_mount_pitch_deg = fs.getd("camera_mount_pitch_deg", 20.0);
+  // 旋向判准后锁定多久（秒）；默认 420 = 7 分钟
+  bc.algo.dir_lock_s = fs.getd("dir_lock_s", 420.0);
   bc.algo.predict_time = fs.getd("predict_time", 0.10);
   bc.algo.gimbal_lead_time = fs.getd("gimbal_lead_time", 0.0);
   bc.algo.alg_latency = fs.getd("alg_latency", 0.0);
@@ -435,9 +441,9 @@ bc.algo.num_reverse = static_cast<int>(fs.getd("num_reverse", bc.algo.num_revers
   bc.algo.cmd_smooth_alpha = fs.getd("cmd_smooth_alpha", bc.algo.cmd_smooth_alpha);
   bc.algo.max_aim_step_px = fs.getd("max_aim_step_px", bc.algo.max_aim_step_px);
   bc.algo.stale_ms = fs.getd("stale_ms", bc.algo.stale_ms);
-  bc.image_topic = fs.gets("image_topic", bc.image_topic);
-  bc.pose_topic = fs.gets("pose_topic", bc.pose_topic);
-  bc.cmd_topic = fs.gets("cmd_topic", bc.cmd_topic);
+  bc.reborn_socket = fs.gets("reborn_socket", bc.reborn_socket);
+  bc.reborn_shm = fs.gets("reborn_shm", bc.reborn_shm);
+  bc.reborn_serial = fs.gets("reborn_serial", bc.reborn_serial);
   bc.max_image_age_ms = fs.getd("max_image_age_ms", 300.0);
   // 与 ④ 的 stale 门统一：取较小者，避免两个不一致的过期判据
   bc.max_image_age_ms = std::min(bc.max_image_age_ms, bc.algo.stale_ms);
@@ -533,30 +539,14 @@ std::atomic<uint64_t> g_img_count{0};
 std::atomic<uint64_t> g_dropped{0};
 std::string g_capture_path;
 
-// ---- rt/rune_kpts：模拟器发布的"每个靶标 8 个真值点"（JSON），只留最新一帧写日志用 ----
+// ---- 真值 / 命中统计（旧模拟器的 rt/rune_kpts、rt/stat）----
+// 新模拟器不发布这两个只读话题：日志文件保留但内容为空。模拟器侧的真值改由
+// bevy_robomaster_simulator 自己的 REBORN_TRUTH_JSONL 落盘，后续再接进来。
 std::mutex g_kpts_mu;
 std::string g_kpts_json;
 std::atomic<uint64_t> g_kpts_count{0};
 std::ofstream g_kpts_log;
 
-void on_rune_kpts(struct z_loaned_sample_t *sample, void *) {
-  const struct z_loaned_bytes_t *pl = z_sample_payload(sample);
-  struct z_owned_slice_t owned;
-  if (z_bytes_to_slice(pl, &owned) != Z_OK) return;
-  const char *d = reinterpret_cast<const char *>(z_slice_data(z_loan(owned)));
-  const size_t n = z_slice_len(z_loan(owned));
-  {
-    std::lock_guard<std::mutex> lk(g_kpts_mu);
-    g_kpts_json.assign(d, n);
-    g_kpts_count++;
-  }
-  z_drop(z_move(owned));
-}
-
-// ---- rt/stat：模拟器发布的命中统计 {launch, accurate, pct}（5Hz，只读）----
-//   launch   总发弹数（键盘 Space 与 cmd/gimbal.fire 都计入）
-//   accurate 在激活窗口内命中符的弹数；pct = accurate/launch
-//   用途：把"拟合好坏"和【真实命中率】挂钩 —— 这是唯一能判断坏窗值不值得继续修的指标。
 std::mutex g_stat_mu;
 std::string g_stat_path;                 // 由 worker 打开 kpts 日志时设置
 std::atomic<uint64_t> g_stat_count{0};
@@ -566,133 +556,31 @@ bool g_stat_tried = false;
 long long g_stat_launch = 0, g_stat_accurate = 0, g_stat_hits = 0;
 double g_stat_pct = 0.0;
 
-// 极简取值：payload 是 serde_json 的固定格式 {"launch":N,"accurate":N,"pct":F}
-static bool json_num(const char *s, const char *key, double *out) {
-  const char *p = std::strstr(s, key);
-  if (p == nullptr) return false;
-  p += std::strlen(key);
-  while (*p == ' ' || *p == ':' || *p == '"') ++p;
-  char *end = nullptr;
-  const double v = std::strtod(p, &end);
-  if (end == p) return false;
-  *out = v;
-  return true;
-}
-
-void on_rune_stat(struct z_loaned_sample_t *sample, void *) {
-  const struct z_loaned_bytes_t *pl = z_sample_payload(sample);
-  struct z_owned_slice_t owned;
-  if (z_bytes_to_slice(pl, &owned) != Z_OK) return;
-  const char *d = reinterpret_cast<const char *>(z_slice_data(z_loan(owned)));
-  const size_t n = z_slice_len(z_loan(owned));
-  std::string js(d, n);
-  double lc = 0, ac = 0, pc = 0, hc = 0;
-  json_num(js.c_str(), "\"launch\"", &lc);
-  json_num(js.c_str(), "\"accurate\"", &ac);
-  json_num(js.c_str(), "\"pct\"", &pc);
-  json_num(js.c_str(), "\"hits\"", &hc);   // ★ 真命中（HUD 上那个 hits=）
-  {
-    std::lock_guard<std::mutex> lk(g_stat_mu);
-    g_stat_launch = static_cast<long long>(lc);
-    g_stat_accurate = static_cast<long long>(ac);
-    g_stat_hits = static_cast<long long>(hc);
-    g_stat_pct = pc;
-    g_stat_count++;
-    std::lock_guard<std::mutex> lk2(g_stat_fp_mu);
-    if (!g_stat_tried && !g_stat_path.empty()) {
-      g_stat_tried = true;
-      g_stat_log.open(g_stat_path, std::ios::trunc);
-      if (g_stat_log) {
-        // launch=发弹数, hits=真命中(打中点亮片), accurate=接触次数(可>launch)
-        g_stat_log << "wall_s,launch,hits,accurate,pct\n";
-        std::cout << "[bridge] rt/stat log -> " << g_stat_path << std::endl;
-      }
-    }
-    if (g_stat_log.is_open()) {
-      const double ws = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            std::chrono::system_clock::now().time_since_epoch())
-                            .count() / 1000.0;
-      g_stat_log << std::fixed << std::setprecision(3) << ws << ',' << g_stat_launch << ','
-                 << g_stat_hits << ',' << g_stat_accurate << ',' << std::setprecision(4)
-                 << g_stat_pct << '\n';
-      g_stat_log.flush();
-    }
-  }
-  z_drop(z_move(owned));
-}
-
-void on_pose(struct z_loaned_sample_t *sample, void *) {
-  const struct z_loaned_bytes_t *pl = z_sample_payload(sample);
-  struct z_owned_slice_t owned;
-  if (z_bytes_to_slice(pl, &owned) != Z_OK) return;
-  const uint8_t *d = z_slice_data(z_loan(owned));
-  const size_t n = z_slice_len(z_loan(owned));
-  GimbalPose p;
-  if (parse_pose(d, n, &p)) {
-    std::lock_guard<std::mutex> lk(g_pose_mu);
-    g_pose = p;
-    g_have_pose = true;
-    g_pose_count++;
-  }
-  z_drop(z_move(owned));
-}
-
-void on_image(struct z_loaned_sample_t *sample, void *) {
-  const struct z_loaned_bytes_t *pl = z_sample_payload(sample);
-  struct z_owned_slice_t owned;
-  if (z_bytes_to_slice(pl, &owned) != Z_OK) return;
-  const uint8_t *d = z_slice_data(z_loan(owned));
-  const size_t n = z_slice_len(z_loan(owned));
-
-  if (!g_capture_path.empty()) {
-    BimgFrame f;
-    if (parse_bimg(d, n, &f)) {
-      cv::Mat rgb(f.h, f.w, CV_8UC3, const_cast<uint8_t *>(f.rgb));
-      cv::Mat bgr;
-      cv::cvtColor(rgb, bgr, cv::COLOR_RGB2BGR);
-      if (cv::imwrite(g_capture_path, bgr)) {
-        std::cout << "[bridge] captured " << f.w << "x" << f.h << " -> " << g_capture_path
-                  << " (ts=" << f.timestamp_ns << ")" << std::endl;
-      } else {
-        std::cerr << "[bridge] imwrite failed: " << g_capture_path << std::endl;
-      }
-      g_stop = true;
-    }
-  } else {
-    BimgFrame f;
-    if (!parse_bimg(d, n, &f)) {
-      std::cerr << "[bridge] bad BIMG frame (len=" << n << ")" << std::endl;
-    } else {
-      g_img_count++;
-      g_frame.put(d, n, f.timestamp_ns);
-    }
-  }
-  z_drop(z_move(owned));
-}
-
 int run_capture(const BridgeConfig &bc, const std::string &out_path, int timeout_s) {
-  g_capture_path = out_path;
-  z_owned_config_t cfg;
-  z_config_default(&cfg);
-  z_owned_session_t session;
-  if (z_open(&session, z_move(cfg), NULL) != Z_OK) {
-    std::cerr << "[bridge] z_open failed" << std::endl;
+  reborn::Camera cam;
+  const reborn::Config rcfg{bc.reborn_socket, bc.reborn_shm, bc.reborn_serial};
+  std::string err;
+  if (!cam.open(rcfg, &err)) {
+    std::cerr << "[bridge] camera open failed: " << err << std::endl;
     return 1;
   }
-  z_owned_closure_sample_t cb;
-  z_closure_sample(&cb, on_image, NULL, NULL);
-  z_view_keyexpr_t ke;
-  z_view_keyexpr_from_str(&ke, bc.image_topic.c_str());
-  z_owned_subscriber_t sub;
-  if (z_declare_subscriber(z_loan(session), &sub, z_loan(ke), z_move(cb), NULL) != Z_OK) {
-    std::cerr << "[bridge] subscribe failed: " << bc.image_topic << std::endl;
-    return 2;
-  }
-  std::cout << "[bridge] subscribed " << bc.image_topic << ", waiting for one frame ..."
-            << std::endl;
+  std::cout << "[bridge] waiting for one frame ..." << std::endl;
   const auto t0 = std::chrono::steady_clock::now();
+  reborn::Frame f;
   while (!g_stop.load()) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    if (cam.recv(&f, 200)) {
+      cv::Mat rgb(f.height, f.width, CV_8UC3, f.bimg.data() + 20);
+      cv::Mat bgr;
+      cv::cvtColor(rgb, bgr, cv::COLOR_RGB2BGR);
+      if (!cv::imwrite(out_path, bgr)) {
+        std::cerr << "[bridge] imwrite failed: " << out_path << std::endl;
+        return 2;
+      }
+      std::cout << "[bridge] captured " << f.width << "x" << f.height << " -> " << out_path
+                << " (ts=" << f.unix_ns << ", fx=" << f.fx << " fy=" << f.fy << " cx=" << f.cx
+                << " cy=" << f.cy << ")" << std::endl;
+      return 0;
+    }
     if (std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() > timeout_s) {
       std::cerr << "[bridge] timeout waiting for frame (simulator running?)" << std::endl;
       return 3;
@@ -1024,56 +912,58 @@ int main(int argc, char **argv) {
     return 4;
   }
 
-  // 姿态 session
-  z_owned_session_t s_pose, s_img;
-  z_owned_config_t c1, c2;
-  z_config_default(&c1);
-  z_config_default(&c2);
-  if (z_open(&s_pose, z_move(c1), NULL) != Z_OK || z_open(&s_img, z_move(c2), NULL) != Z_OK) {
-    std::cerr << "[bridge] z_open failed" << std::endl;
+  // ---- Reborn27 传输：相机 IPC + 云台串口 ----
+  // 相机光轴与枪管同轴，遥测/指令都在枪口系（pitch 下正），与桥内部约定一致，
+  // 所以这里不做任何角度换装，pitch_offset_deg 在配置里置 0。
+  reborn::Camera cam;
+  reborn::Serial ser;
+  const reborn::Config rcfg{bc.reborn_socket, bc.reborn_shm, bc.reborn_serial};
+  std::string transport_err;
+  if (!cam.open(rcfg, &transport_err)) {
+    std::cerr << "[bridge] camera: " << transport_err << std::endl;
     return 5;
   }
-
-  z_owned_closure_sample_t cb_pose, cb_img, cb_kpts, cb_stat;
-  z_closure_sample(&cb_pose, on_pose, NULL, NULL);
-  z_closure_sample(&cb_img, on_image, NULL, NULL);
-  z_closure_sample(&cb_kpts, on_rune_kpts, NULL, NULL);
-  z_closure_sample(&cb_stat, on_rune_stat, NULL, NULL);
-  z_view_keyexpr_t ke_pose, ke_img, ke_cmd, ke_kpts, ke_stat;
-  z_view_keyexpr_from_str(&ke_pose, bc.pose_topic.c_str());
-  z_view_keyexpr_from_str(&ke_img, bc.image_topic.c_str());
-  z_view_keyexpr_from_str(&ke_cmd, bc.cmd_topic.c_str());
-  z_view_keyexpr_from_str(&ke_kpts, bc.rune_kpts_topic.c_str());
-  z_view_keyexpr_from_str(&ke_stat, bc.rune_stat_topic.c_str());
-
-  z_owned_subscriber_t sub_pose, sub_img, sub_kpts;
-  z_owned_publisher_t pub;
-  if (z_declare_subscriber(z_loan(s_pose), &sub_pose, z_loan(ke_pose), z_move(cb_pose), NULL) !=
-      Z_OK) {
-    std::cerr << "[bridge] subscribe pose failed" << std::endl;
+  if (!ser.open(bc.reborn_serial, &transport_err)) {
+    std::cerr << "[bridge] serial: " << transport_err << std::endl;
     return 6;
   }
-  if (z_declare_subscriber(z_loan(s_img), &sub_img, z_loan(ke_img), z_move(cb_img), NULL) != Z_OK) {
-    std::cerr << "[bridge] subscribe image failed" << std::endl;
-    return 7;
-  }
-  if (z_declare_subscriber(z_loan(s_img), &sub_kpts, z_loan(ke_kpts), z_move(cb_kpts),
-                           NULL) != Z_OK) {
-    // 不致命：模拟器还没发这个 topic 时只是没有真值日志
-    std::cerr << "[bridge] subscribe rune_kpts failed (真值日志将为空)" << std::endl;
-  }
-  z_owned_subscriber_t sub_stat;
-  if (z_declare_subscriber(z_loan(s_pose), &sub_stat, z_loan(ke_stat), z_move(cb_stat), NULL) !=
-      Z_OK) {
-    // 同样不致命：没有 rt/stat 时只是没有命中率日志
-    std::cerr << "[bridge] subscribe rt/stat failed (命中率日志将为空)" << std::endl;
-  }
-  if (z_declare_publisher(z_loan(s_img), &pub, z_loan(ke_cmd), NULL) != Z_OK) {
-    std::cerr << "[bridge] declare publisher failed" << std::endl;
-    return 8;
-  }
-  std::cout << "[bridge] subscribed " << bc.pose_topic << " + " << bc.image_topic
-            << ", publishing " << bc.cmd_topic << std::endl;
+  std::cout << "[bridge] camera " << bc.reborn_socket << " + serial " << bc.reborn_serial
+            << std::endl;
+
+  // 图像线程：阻塞收帧，只保留最新一帧
+  std::thread image_thread([&] {
+    reborn::Frame f;
+    while (!g_stop.load()) {
+      if (cam.recv(&f, 200)) {
+        g_img_count++;
+        g_frame.put(f.bimg.data(), f.bimg.size(), f.unix_ns);
+        continue;
+      }
+      if (!cam.is_open()) {
+        // 模拟器重启/断线：退避后重连；新会话序号重新计数
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        std::string e;
+        if (cam.open(rcfg, &e)) std::cout << "[bridge] camera reconnected" << std::endl;
+      }
+    }
+  });
+
+  // 姿态线程：串口读线程只留最新值，这里搬进全局给 worker
+  std::thread pose_thread([&] {
+    while (!g_stop.load()) {
+      float y = 0, p = 0, r = 0;
+      uint64_t n = 0;
+      if (ser.latest(&y, &p, &r, &n)) {
+        std::lock_guard<std::mutex> lk(g_pose_mu);
+        g_pose.yaw = y;
+        g_pose.pitch = p;
+        g_pose.roll = r;
+        g_have_pose = true;
+        g_pose_count = n;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+  });
 
   std::atomic<uint64_t> processed{0};
   std::thread worker([&] {
@@ -1163,10 +1053,9 @@ int main(int argc, char **argv) {
       const bool fire = bc.algo.fire_enabled && control && out.fire;
       const double yaw = control ? out.yaw : pose.yaw;
       const double pitch = control ? out.pitch : pose.pitch;
-      const std::string js = make_cmd_json(yaw, pitch, 0.0, fire, control);
-      z_owned_bytes_t b;
-      z_bytes_copy_from_buf(&b, reinterpret_cast<const uint8_t *>(js.data()), js.size());
-      z_put(z_loan(s_img), z_loan(ke_cmd), z_move(b), NULL);
+      if (!ser.send(yaw, pitch, fire, control)) {
+        std::cerr << "[bridge] serial write failed" << std::endl;
+      }
 
       if (bc.algo.visualize && !out.debug.empty() &&
                 (bc.algo.visualize_every <= 1 || fire ||
@@ -1222,11 +1111,14 @@ int main(int argc, char **argv) {
         std::printf(
             "[bridge] #%llu age=%.0fms det=%d sel=%d solved=%d q=%d st=%d dis=%.2f "
             "roll=%.3f w=%.3f lead=%.3f lat=%.1fms cmd=(%.2f,%.2f) err=%.4f ctrl=%d fire=%d "
+            "lok=%d hctr=%d aval=%d ajmp=%d "
             "nt=%d dlt=%.0f rc=%.2f fps=%.1f hit=%lld/%lld\n",
             static_cast<unsigned long long>(k), age_ms, out.n_det, out.n_selected,
             out.solved ? 1 : 0, out.quality ? 1 : 0, out.status, out.buff_dis, out.roll,
             out.roll_velocity, out.lead_s, out.latency_ms, yaw * 180 / M_PI, pitch * 180 / M_PI,
-            out.fire_err, control ? 1 : 0, fire ? 1 : 0, out.dual_targets, out.dual_delta_deg,
+            out.fire_err, control ? 1 : 0, fire ? 1 : 0,
+            out.dbg_local_ok ? 1 : 0, out.dbg_have_center ? 1 : 0, out.dbg_aim_valid ? 1 : 0,
+            out.dbg_aim_jumped ? 1 : 0, out.dual_targets, out.dual_delta_deg,
             out.rc_dist_m, fps_now, g_stat_hits, g_stat_launch);
         std::fflush(stdout);
       }
@@ -1254,13 +1146,14 @@ int main(int argc, char **argv) {
             "[dual] droll=(%.1f,%.1f)deg pick=(%d,%d) dres=%.1fdeg chord=%.3fm "
             "rcd=%.2fm dlt=%.0f cand=(%.0f,%.0f)px | ctr=%d n=%d rms=%.3fm | local n=%d rdy=%d "
             "rms=%.1fdeg span=%.0fdeg w=%.2f LK=%d om=%.3f A=%.3f drop=%d lost=%d hit=%d "
-            "theta=%.3f ch=%d rej=%d heal=%d\n",
+            "theta=%.3f ch=%d rej=%d heal=%d dir=%d\n",
             out.droll_deg[0], out.droll_deg[1], out.sol_pick_t[0], out.sol_pick_t[1],
             out.dual_resid_deg, out.chord_m, out.dual_rcd_m, out.dual_delta_deg, out.cand_px[0],
             out.cand_px[1], out.center_src, out.center_n, out.center_rms_m, out.local_n,
             out.local_ready, out.local_rms_deg, out.local_span_deg, out.local_w, out.local_locked, out.local_omega,
             out.local_amp, out.local_drop, out.local_lost, out.local_hit,
-            out.local_theta, out.local_chord, out.local_phys_rej, out.local_phys_heal);
+            out.local_theta, out.local_chord, out.local_phys_rej, out.local_phys_heal,
+            out.dbg_dir_sgn);
         std::fflush(stdout);
       }
       // 单片时的圆心诊断（大符只检出一片、或小符）：[dual] 行不会打印
@@ -1283,12 +1176,14 @@ int main(int argc, char **argv) {
     static int warned = 0;
     if (el > 5.0 && g_img_count.load() == 0 && warned < 6) {
       ++warned;
-      std::cerr << "[bridge] 还没收到图像，等待中 — 模拟器在跑吗？（订阅 " << bc.image_topic
+      std::cerr << "[bridge] 还没收到图像，等待中 — 模拟器在跑吗？（" << bc.reborn_socket
                 << "）" << std::endl;
     }
   }
   g_frame.cv.notify_all();
   worker.join();
+  if (image_thread.joinable()) image_thread.join();
+  if (pose_thread.joinable()) pose_thread.join();
   std::cout << "\n[bridge] === SUMMARY ===\n"
             << "  image msgs=" << g_img_count.load() << "  processed=" << processed.load()
             << "  pose msgs=" << g_pose_count.load() << std::endl;

@@ -75,8 +75,8 @@ namespace {
 // 云台系(X前 Y左 Z上) -> 相机系(OpenCV: X右 Y下 Z前)
 // 委托给 hw26_pipeline.hpp 里的单一来源 gimbal_to_camera()，
 // 不要再在这里手写公式——相机挂装一变这里就会静默错。
-inline Eigen::Vector3f gimbal_to_cam(const Eigen::Vector3f &p_g) {
-  return gimbal_to_camera(p_g);
+inline Eigen::Vector3f gimbal_to_cam(const Eigen::Vector3f &p_g, float pitch_rad) {
+  return gimbal_to_camera(p_g, pitch_rad);
 }
 // 相机系 -> 像素（模拟器畸变为 0）。depth = p_cam.z()
 inline bool project_cam(const Eigen::Vector3f &p_cam, const cv::Mat &K, int *px, int *py) {
@@ -443,6 +443,12 @@ struct Pipeline::Impl {
   int frame_count = 0;
   double last_fire_t = -1e9;
   int align_run = 0;
+  /// 锁存的旋向（+1 = 相位递增，-1 = 递减，0 = 还没判出来）。
+  /// 只用来决定 A/B 谁是"先被打到的那片"，不参与任何滤波/预测。
+  double dir_sgn = 0.0;
+  /// 锁定期到什么时候（图像时间轴）。判准一次后到点前不再重新判，
+  /// 否则起始阶段 tracker 窗口短、符号来回翻 -> 橙/蓝跳变。
+  double dir_lock_until_t = -1e18;
   double last_latency_ms = 0.0;
   std::ofstream log;
   cv::FileStorage tracker_fs;
@@ -605,7 +611,9 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   // 取值来自 hw26_pipeline.hpp 的单一来源：当前模拟器的相机与枪管平行
   // （光轴比云台前向高 20.00°）。旧值 [0,0,1,-1,0,0,0,-1,0] 假设相机在云台轴上，
   // 会让目标在云台系里整体低 20° -> 云台指令低 20° -> 打低。
-  const Eigen::Matrix3f R_cam2gim = R_camera2gimbal();
+  const float cam_mount_pitch =
+      static_cast<float>(I.cfg.camera_mount_pitch_deg * M_PI / 180.0);
+  const Eigen::Matrix3f R_cam2gim = R_camera2gimbal(cam_mount_pitch);
   // 枪口相对相机光心（云台系）；模拟器 POWER_RUNE_INTERFACE.md:105 的实测外参
   const Eigen::Vector3f t_muzzle(static_cast<float>(I.cfg.muzzle_offset[0]),
                                  static_cast<float>(I.cfg.muzzle_offset[1]),
@@ -1187,7 +1195,7 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
             auto proj_cand = [&](const Eigen::Vector2f &cyz, int *px, int *py) -> bool {
               const Eigen::Vector3f cf(0.5f * (t0.x() + t1.x()), cyz.x(), cyz.y());
               const Eigen::Vector3f pc = R_cg.transpose() * (I.R_chassis_face * cf);
-              return project_cam(gimbal_to_cam(pc), I.cfg.camera_matrix, px, py);
+              return project_cam(gimbal_to_cam(pc, cam_mount_pitch), I.cfg.camera_matrix, px, py);
             };
             int x1 = -1, y1 = -1, x2 = -1, y2 = -1;
             if (proj_cand(c1, &x1, &y1) && proj_cand(c2, &x2, &y2)) {
@@ -1245,13 +1253,36 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       // ★ 组号必须【稳定】：按 wrap 之后的相位先后决定谁是 1 号，而不是按置信度。
       //   按置信度排的话，两片置信度互相超过时（0.91 <-> 0.89）黄/品红会来回换 ——
       //   这是实测看到的现象。相位差是常数，所以 wrap 后的先后是稳定的。
+      //
+      // ★★ 谁是 A(橙) 必须跟着【旋向】走 ★★
+      //   2026-10-16 实测标定（视觉 vs 桥观测）：
+      //     符视觉【顺时针】 -> 桥看到 roll 递增 -> dir_sgn = +1 -> A(橙) 取相位【大】者
+      //     符视觉【逆时针】 -> roll 递减         -> dir_sgn = -1 -> A(橙) 取相位【小】者
+      //   依据：老模拟器 FACE_2 固定 clockwise=false（视觉逆时针），旧代码无条件取小，
+      //   那条路径上表现是对的；新模拟器旋向每次启动 50/50 随机，所以必须显式判。
+      //   注意这里与"顺着旋向找后面那片"的直觉相反 —— 原因是符面系的法向朝向相机，
+      //   视角方向与 roll 的正向相反，所以"反着旋向取相位靠前"在数值上就是取大。
+      //   方向取局部 tracker 的相位净变化并【锁存】（避免逐帧抖动）；
+      //   还没判出来时按 dir=-1（逆时针，= 老模拟器那条路径）处理，旧行为不变。
+      //   只在【解锁】且判据足够可信（窗口跨度 >= 45deg）时判一次，然后锁定
+      //   cfg.dir_lock_s 秒（默认 420s = 7 分钟）；锁定期内绝不翻转 -> 橙/蓝不跳变。
+      if (t_rel > I.dir_lock_until_t && I.local_trk.ready() &&
+          I.local_trk.span_deg() >= 45.0) {
+        I.dir_sgn = (I.local_trk.sgn() >= 0.0) ? 1.0 : -1.0;
+        I.dir_lock_until_t = t_rel + I.cfg.dir_lock_s;
+      }
+      const bool want_larger = (I.dir_sgn > 0.0);
       Buff A = obs;
       Buff B(use2);
       bool pose0_is_a = true;
-      if (wrap_pi(static_cast<double>(B.roll) - static_cast<double>(A.roll)) < 0.0) {
+      const double roll_delta = wrap_pi(static_cast<double>(B.roll) - static_cast<double>(A.roll));
+      // 当前 A=obs：roll_delta>0 表示 A 的相位更小。
+      const bool a_is_larger = (roll_delta < 0.0);
+      if (a_is_larger != want_larger) {
         std::swap(A, B);
         pose0_is_a = false;
       }
+      out.dbg_dir_sgn = (I.dir_sgn > 0.0) ? 1 : ((I.dir_sgn < 0.0) ? -1 : 0);
       const std::size_t src_a = pose_src.size() >= 2
                                     ? (pose0_is_a ? pose_src[0] : pose_src[1])
                                     : 0;
@@ -1515,6 +1546,8 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   //   现在：局部可用即可进（滑行时 ready() 仍为真，所以也包含灭灯期）。
   const bool local_ok =
       (I.cfg.local_tracker != 0) && I.local_trk.ready() && I.have_center;
+  out.dbg_local_ok = local_ok;
+  out.dbg_have_center = I.have_center;
   // ★ 本地 ready 时优先用本地；aim_local_only=1 时本地未 ready 就【不出瞄准】，
   //   避免回退到会转圈的 HW26 predictor（实测 438/682 控制帧来自它）。
   const bool local_only = I.cfg.aim_local_only && (I.cfg.local_tracker != 0);
@@ -1624,16 +1657,20 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       I.aim_ch_valid = true;
       {
         const Eigen::Vector3f p_gim = R_cg.transpose() * I.aim_ch_abs;
-        project_cam(gimbal_to_cam(p_gim), I.cfg.camera_matrix, &out.aim_px_x, &out.aim_px_y);
+        project_cam(gimbal_to_cam(p_gim, cam_mount_pitch), I.cfg.camera_matrix, &out.aim_px_x,
+                    &out.aim_px_y);
       }
 
       // (1) aim 像素瞬移拒帧：PnP 翻转 / 换扇叶会让 aim 点瞬移 -> 本帧不伺服
       bool aim_jumped = false;
+      out.dbg_aim_valid = true;
+      out.dbg_aim_jumped = false;
       if (I.have_prev_aim_px && out.aim_px_x > 0) {
         const double step = std::hypot(static_cast<double>(out.aim_px_x) - I.prev_aim_px.x,
                                        static_cast<double>(out.aim_px_y) - I.prev_aim_px.y);
         aim_jumped = step > I.cfg.max_aim_step_px;
       }
+      out.dbg_aim_jumped = aim_jumped;
       if (!aim_jumped) {
         // (2) 角速度限幅：clamp(raw - 当前姿态, ±slew*dt)（与帧率无关）
         double dt = 0.033;
@@ -1713,7 +1750,7 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   {
     auto project_px = [&](const Eigen::Vector3f &p_ch, int *px, int *py) -> bool {
       const Eigen::Vector3f p_gim = R_cg.transpose() * p_ch;
-      return project_cam(gimbal_to_cam(p_gim), I.cfg.camera_matrix, px, py);
+      return project_cam(gimbal_to_cam(p_gim, cam_mount_pitch), I.cfg.camera_matrix, px, py);
     };
     if (I.aim_ch_valid) project_px(I.aim_ch_abs, &out.green_px_x, &out.green_px_y);
     if (I.face_ready) {
@@ -1738,7 +1775,8 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   if (I.cfg.visualize) {
     // 车体系 -> 像素（可视化块自己的助手；上面 aim 段那个 project_px 不在此作用域）
     auto proj_ch = [&](const Eigen::Vector3f &p_ch, int *px, int *py) -> bool {
-      return project_cam(gimbal_to_cam(R_cg.transpose() * p_ch), I.cfg.camera_matrix, px, py);
+      return project_cam(gimbal_to_cam(R_cg.transpose() * p_ch, cam_mount_pitch),
+                         I.cfg.camera_matrix, px, py);
     };
     out.debug = bgr.clone();
     const int cx = static_cast<int>(std::lround(I.cfg.camera_matrix.at<double>(0, 2)));

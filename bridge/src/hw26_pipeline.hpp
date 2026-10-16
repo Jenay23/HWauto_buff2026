@@ -42,23 +42,26 @@ namespace hw26_bridge {
 // 当前模拟器把相机装成与【枪管平行】：光轴比云台前向高 20.00°
 // （= SHOT_DIRECTION 的仰角；枪管同样比云台前向高 20.00°，两者夹角 0°）。
 //
-// 历史值对照（同一含义、只换挂装）：
-//   [0,0,1, -1,0,0, 0,-1,0]                相机在云台轴上（原模拟器，比枪管低 20°）
-//   [0,0.342020,0.939693, -1,0,0, 0,-0.939693,0.342020]  与枪管平行（现在）
-// 改这里一处即可：gimbal_to_camera() 与所有调用点都由它派生。
-inline Eigen::Matrix3f R_camera2gimbal()
+// ★ 这个倾角必须跟着【姿态发布的是哪个系】走，由 config 的
+//   camera_mount_pitch_deg 提供（单一来源，gimbal_to_camera() 与所有调用点都派生自它）：
+//     旧模拟器 at_vision_simulator：rt/gimbal_pose 发的是【云台系】，相机与枪管平行、
+//       比云台前向高 20° -> camera_mount_pitch_deg = 20.0（OpenCV 相机系 X右Y下Z前 -> 云台系）
+//     新模拟器 bevy/Reborn27：SP 遥测发的是【枪口系】，相机与枪口同轴 ->
+//       camera_mount_pitch_deg = 0.0，否则目标会被整体抬高 20° -> 指令高 20° -> 打飞
+inline Eigen::Matrix3f R_camera2gimbal(float pitch_rad)
 {
+  const float c = std::cos(pitch_rad), s = std::sin(pitch_rad);
   Eigen::Matrix3f m;
-  m << 0.f, 0.342020f, 0.939693f,
+  m << 0.f, s, c,
       -1.f, 0.f, 0.f,
-      0.f, -0.939693f, 0.342020f;
+      0.f, -c, s;
   return m;
 }
 
-/// 云台系 -> 相机系（= R_camera2gimbal 的转置；不要再手写公式）
-inline Eigen::Vector3f gimbal_to_camera(const Eigen::Vector3f & p_gimbal)
+/// 云台(姿态)系 -> 相机系（= R_camera2gimbal 的转置；不要再手写公式）
+inline Eigen::Vector3f gimbal_to_camera(const Eigen::Vector3f & p_gimbal, float pitch_rad)
 {
-  return R_camera2gimbal().transpose() * p_gimbal;
+  return R_camera2gimbal(pitch_rad).transpose() * p_gimbal;
 }
 
 // 观测向量送入 Tracker 前使用的参考系
@@ -117,6 +120,12 @@ struct Config {
   // 原 1303.686 对应 fov_y = 45°，会让 PnP 把 6.9m 的符算成 9.2m
   cv::Mat camera_matrix = (cv::Mat_<double>(3, 3) << 1739.1, 0, 720, 0, 1739.1, 540, 0, 0, 1);
   cv::Mat distort_coeffs = cv::Mat::zeros(1, 5, CV_64F);
+  /// 相机光轴相对【姿态系】的固定上仰角（度）。旧模拟器 pose=云台系 -> 20；
+  /// 新模拟器 pose=枪口系 -> 0。见 R_camera2gimbal() 的说明。
+  double camera_mount_pitch_deg = 20.0;
+  /// 旋向判准后锁定多久（秒）。锁定期内不再改 A/B 的取大/取小，消除起始阶段的
+  /// 橙/蓝跳变。默认 420 = 7 分钟；到期后允许重新判定（换符/反转时会用上）。
+  double dir_lock_s = 420.0;
 
   // HW26 自身参数
   int buff_mode = 1;    // 1 = 小符, 2 = 大符
@@ -233,6 +242,13 @@ struct Config {
 
 struct Output {
   bool control = false;
+  // ---- 诊断：control=false 时到底是哪一道门挡的 ----
+  bool dbg_local_ok = false;    // 局部 tracker ready 且已锁存转盘中心
+  bool dbg_have_center = false; // 转盘中心是否已锁存
+  bool dbg_aim_valid = false;   // 弹道解是否算出来了
+  bool dbg_aim_jumped = false;  // aim 像素瞬移超门（max_aim_step_px）
+  int dbg_dir_sgn = 0;          // 锁存的旋向：+1 相位递增 / -1 递减 / 0 未知
+
   bool fire = false;
   double yaw = 0.0;    // rad, 外部系
   double pitch = 0.0;  // rad, 外部系（负=抬枪）
