@@ -276,6 +276,11 @@ struct Pipeline::Impl {
 
   // ---- 分节函数（P2：从 process() 原样搬出，逻辑一行未改）----
   static std::vector<DetectedBuff> detect_blades(Impl &I, const cv::Mat &bgr, Output &out);
+  static void log_frame(Impl &I, Output &out, const Eigen::Matrix3f &R_cg,
+                        const Eigen::Vector3f &t_muzzle, double lead, double fly,
+                        int64_t sim_timestamp_ns,
+                        std::chrono::steady_clock::time_point t_start, float gimbal_yaw,
+                        float gimbal_pitch, float gimbal_roll);
 };
 
 Pipeline::Pipeline(const Config &cfg) : impl_(new Impl(cfg)) {
@@ -460,6 +465,73 @@ std::vector<DetectedBuff> Pipeline::Impl::detect_blades(Impl &I, const cv::Mat &
   }
 
   return detected;
+}
+
+// §9b + §10：两个可视化点 + 延迟/逐帧 CSV 写盘（P2-4，原样搬出 process()）。
+void Pipeline::Impl::log_frame(Impl &I, Output &out, const Eigen::Matrix3f &R_cg,
+                                const Eigen::Vector3f &t_muzzle, double lead, double fly,
+                                int64_t sim_timestamp_ns,
+                                std::chrono::steady_clock::time_point t_start,
+                                float gimbal_yaw, float gimbal_pitch, float gimbal_roll) {
+  // 9b) 两个可视化点（总是计算；仅 visualize 时绘制）
+  {
+    auto project_px = [&](const Eigen::Vector3f &p_ch, int *px, int *py) -> bool {
+      const Eigen::Vector3f p_gim = R_cg.transpose() * p_ch;
+      return project_cam(gimbal_to_cam(p_gim), I.cfg.camera_matrix, px, py);
+    };
+    if (I.aim_ch_valid) project_px(I.aim_ch_abs, &out.green_px_x, &out.green_px_y);
+    if (I.face_ready) {
+      // 枪管相对云台固定上仰 20deg；云台物理俯仰 = -gimbal_pitch（模拟器 pitch<0 抬枪）
+      const double barrel_elev =
+          -static_cast<double>(gimbal_pitch) + (-I.cfg.pitch_offset_deg) * M_PI / 180.0;
+      const double gyaw = static_cast<double>(gimbal_yaw);
+      const Eigen::Vector3f dir_ch(static_cast<float>(std::cos(barrel_elev) * std::cos(gyaw)),
+                                   static_cast<float>(std::cos(barrel_elev) * std::sin(gyaw)),
+                                   static_cast<float>(std::sin(barrel_elev)));
+      const Eigen::Vector3f muzzle_ch = R_cg * t_muzzle;
+      const float denom = I.n_face.dot(dir_ch);
+      if (std::abs(denom) > 1e-4f) {
+        const float tt = I.n_face.dot(I.c_face_chassis - muzzle_ch) / denom;
+        if (tt > 0.f && tt < 60.f) {
+          project_px(muzzle_ch + tt * dir_ch, &out.blue_px_x, &out.blue_px_y);
+        }
+      }
+    }
+  }
+
+
+  g_stage_acc.mark(4);
+  const auto t_end = std::chrono::steady_clock::now();
+  out.lead_s = lead;
+  out.latency_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+  I.last_latency_ms = out.latency_ms;
+  g_stage_acc.report(out.latency_ms);
+
+  // 10) 日志（含 ④ 日志里最有用的那些量，避免重犯"无日志"的错）
+  if (I.log) {
+    const bool interesting = out.fire || (I.frame_count % std::max(1, I.cfg.log_every) == 0);
+    if (interesting) {
+      // Absolute image timestamp (unix-epoch ns) so this CSV can be joined with
+      // any other log on the same clock. The old column here was t_rel, a
+      // RELATIVE time since the bridge anchored, which cannot be joined.
+      I.log << I.frame_count << ',' << sim_timestamp_ns << ',' << out.latency_ms << ','
+            << gimbal_yaw * 180.0 / M_PI << ',' << gimbal_pitch * 180.0 / M_PI << ',' << out.n_det
+            << ',' << out.n_selected << ',' << (out.solved ? 1 : 0) << ','
+            << (out.quality ? 1 : 0) << ',' << out.status << ',' << out.buff_dis << ',' << out.roll
+            << ',' << out.roll_velocity << ',' << lead << ',' << fly << ',' << out.aim_px_x << ','
+            << out.aim_px_y << ',' << out.yaw * 180.0 / M_PI << ','
+            << out.pitch * 180.0 / M_PI << ',' << out.fire_err << ',' << (out.control ? 1 : 0)
+            << ',' << (out.fire ? 1 : 0) << ','
+            << out.face_ex << ',' << out.reproj_px << ','
+            << gimbal_roll * 180.0 / M_PI << ',' << out.face_tilt_deg << ','
+            << out.local_theta << ',' << out.local_chord << ','
+            << out.local_amp << ',' << out.local_omega << ','
+            << (out.meas_a_valid ? 1 : 0) << ',' << (out.meas_b_valid ? 1 : 0) << ','
+            << out.meas_a_ch.x() << ',' << out.meas_a_ch.y() << ',' << out.meas_a_ch.z() << ','
+            << out.meas_b_ch.x() << ',' << out.meas_b_ch.y() << ',' << out.meas_b_ch.z() << '\n';
+      I.log.flush();
+    }
+  }
 }
 
 Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_timestamp_ns,
@@ -1535,65 +1607,9 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
     I.have_prev_aim_px = false;
   }
 
-  // 9b) 两个可视化点（总是计算；仅 visualize 时绘制）
-  {
-    auto project_px = [&](const Eigen::Vector3f &p_ch, int *px, int *py) -> bool {
-      const Eigen::Vector3f p_gim = R_cg.transpose() * p_ch;
-      return project_cam(gimbal_to_cam(p_gim), I.cfg.camera_matrix, px, py);
-    };
-    if (I.aim_ch_valid) project_px(I.aim_ch_abs, &out.green_px_x, &out.green_px_y);
-    if (I.face_ready) {
-      // 枪管相对云台固定上仰 20deg；云台物理俯仰 = -gimbal_pitch（模拟器 pitch<0 抬枪）
-      const double barrel_elev =
-          -static_cast<double>(gimbal_pitch) + (-I.cfg.pitch_offset_deg) * M_PI / 180.0;
-      const double gyaw = static_cast<double>(gimbal_yaw);
-      const Eigen::Vector3f dir_ch(static_cast<float>(std::cos(barrel_elev) * std::cos(gyaw)),
-                                   static_cast<float>(std::cos(barrel_elev) * std::sin(gyaw)),
-                                   static_cast<float>(std::sin(barrel_elev)));
-      const Eigen::Vector3f muzzle_ch = R_cg * t_muzzle;
-      const float denom = I.n_face.dot(dir_ch);
-      if (std::abs(denom) > 1e-4f) {
-        const float tt = I.n_face.dot(I.c_face_chassis - muzzle_ch) / denom;
-        if (tt > 0.f && tt < 60.f) {
-          project_px(muzzle_ch + tt * dir_ch, &out.blue_px_x, &out.blue_px_y);
-        }
-      }
-    }
-  }
+  Impl::log_frame(I, out, R_cg, t_muzzle, lead, fly, sim_timestamp_ns, t_start, gimbal_yaw,
+                  gimbal_pitch, gimbal_roll);
 
-
-  g_stage_acc.mark(4);
-  const auto t_end = std::chrono::steady_clock::now();
-  out.lead_s = lead;
-  out.latency_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
-  I.last_latency_ms = out.latency_ms;
-  g_stage_acc.report(out.latency_ms);
-
-  // 10) 日志（含 ④ 日志里最有用的那些量，避免重犯"无日志"的错）
-  if (I.log) {
-    const bool interesting = out.fire || (I.frame_count % std::max(1, I.cfg.log_every) == 0);
-    if (interesting) {
-      // Absolute image timestamp (unix-epoch ns) so this CSV can be joined with
-      // any other log on the same clock. The old column here was t_rel, a
-      // RELATIVE time since the bridge anchored, which cannot be joined.
-      I.log << I.frame_count << ',' << sim_timestamp_ns << ',' << out.latency_ms << ','
-            << gimbal_yaw * 180.0 / M_PI << ',' << gimbal_pitch * 180.0 / M_PI << ',' << out.n_det
-            << ',' << out.n_selected << ',' << (out.solved ? 1 : 0) << ','
-            << (out.quality ? 1 : 0) << ',' << out.status << ',' << out.buff_dis << ',' << out.roll
-            << ',' << out.roll_velocity << ',' << lead << ',' << fly << ',' << out.aim_px_x << ','
-            << out.aim_px_y << ',' << out.yaw * 180.0 / M_PI << ','
-            << out.pitch * 180.0 / M_PI << ',' << out.fire_err << ',' << (out.control ? 1 : 0)
-            << ',' << (out.fire ? 1 : 0) << ','
-            << out.face_ex << ',' << out.reproj_px << ','
-            << gimbal_roll * 180.0 / M_PI << ',' << out.face_tilt_deg << ','
-            << out.local_theta << ',' << out.local_chord << ','
-            << out.local_amp << ',' << out.local_omega << ','
-            << (out.meas_a_valid ? 1 : 0) << ',' << (out.meas_b_valid ? 1 : 0) << ','
-            << out.meas_a_ch.x() << ',' << out.meas_a_ch.y() << ',' << out.meas_a_ch.z() << ','
-            << out.meas_b_ch.x() << ',' << out.meas_b_ch.y() << ',' << out.meas_b_ch.z() << '\n';
-      I.log.flush();
-    }
-  }
   ++I.frame_count;
   (void)dt_frame;
   return out;
