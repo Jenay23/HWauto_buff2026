@@ -54,6 +54,7 @@ add_executable(hw26_sim_bridge
   src/main.cpp
   src/config_io.cpp
   src/selftest.cpp
+  src/replay.cpp
   src/hw26_pipeline.cpp
   src/local_tracker.cpp
   ${HW26_SOURCES}
