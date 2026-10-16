@@ -453,6 +453,9 @@ struct Pipeline::Impl {
   cv::FileStorage tracker_fs;
 
   explicit Impl(const Config &c) : cfg(c) {}
+
+  // ---- 分节函数（P2：从 process() 原样搬出，逻辑一行未改）----
+  static std::vector<DetectedBuff> detect_blades(Impl &I, const cv::Mat &bgr, Output &out);
 };
 
 Pipeline::Pipeline(const Config &cfg) : impl_(new Impl(cfg)) {
@@ -567,6 +570,76 @@ int Pipeline::self_test_image(const cv::Mat &bgr) {
               << d.keypoints[0].y() << ")" << std::endl;
   }
   return static_cast<int>(det.size());
+}
+
+// §2–3：letterbox/blob + OpenVINO 推理 + 解码 + 把检出填进 out（P2 第 1 段，原样搬出）。
+std::vector<DetectedBuff> Pipeline::Impl::detect_blades(Impl &I, const cv::Mat &bgr, Output &out) {
+  // 2) letterbox + blob（与 HW26 的 TensorRT 路径完全同构）
+  LetterboxInfo info;
+  cv::Mat lb = buff_algo::letterbox_image(bgr, info, I.in_size);
+  cv::Mat blob =
+      cv::dnn::blobFromImage(lb, 1.0 / 255.0, I.in_size, cv::Scalar(), true, false, CV_32F);
+    g_stage_acc.mark(1);
+
+  // 3) OpenVINO 推理（替代 TensorRT）
+  ov::Tensor in_t(I.compiled.input().get_element_type(), I.compiled.input().get_shape(),
+                  blob.ptr<float>());
+  I.req.set_input_tensor(in_t);
+  I.req.infer();
+    g_stage_acc.mark(2);
+  const float *raw = I.req.get_output_tensor(0).data<const float>();
+  // 全候选最大类别分（不做阈值），用于判断"离检出差多远"
+  {
+    float mx = 0.0f;
+    for (int64_t i = 0; i < kCandidateCount; ++i) {
+      const float *row = raw + i * kOutputColumns + 4;
+      for (int c = 0; c < 4; ++c) {
+        if (row[c] > mx) mx = row[c];
+      }
+    }
+    out.max_score = mx;
+  }
+  const auto detected =
+      buff_algo::decode_detections(raw, kCandidateCount, kOutputColumns, info, I.dcfg);
+    g_stage_acc.mark(3);
+  out.n_det = static_cast<int>(detected.size());
+  // 可视化：把【每一个】检出的关键点都收进来（大符会有 2 组），
+  // 而不是只画 detected[0] —— 后者是置信度最高的那个，两片靶标会互相超过，
+  // 于是画出来的点在两片之间来回跳。这不影响 tracker 的输入。
+  for (const auto &d : detected) {
+    std::vector<cv::Point2f> one;
+    one.reserve(d.keypoints.size());
+    for (const auto &q : d.keypoints) one.emplace_back(q.x(), q.y());
+    out.det_kpts.push_back(std::move(one));
+    // 青环（旋转中心 R）：HW26 的 keypoints[8] 就是模型【直接输出】的转盘中心
+    // 换回 HW26 后恢复这里，青环与"两片夹角"等几何判断才有依据。
+    if (!detected.empty() && detected[0].keypoints.size() > 8) {
+      const auto &rc = detected[0].keypoints[8];
+      I.last_rcenter = cv::Point2f(rc.x(), rc.y());
+      I.have_rcenter = true;
+    }
+  }
+  if (!detected.empty()) {
+    for (const auto &q : detected[0].keypoints)
+      I.last_kpt.push_back(cv::Point2f(q.x(), q.y()));
+  }
+  out.dets.reserve(detected.size());
+  for (const auto &d : detected) {
+    DetInfo di;
+    di.color = d.detection.color;
+    di.label = d.detection.label;
+    di.confidence = d.detection.confidence;
+    di.cx = d.detection.t.x();
+    di.cy = d.detection.t.y();
+    // 原始 9 个关键点展平成 18 个数（图像像素，letterbox 已还原）
+    for (int k = 0; k < 9; ++k) {
+      di.kpts[2 * k] = d.keypoints[k].x();
+      di.kpts[2 * k + 1] = d.keypoints[k].y();
+    }
+    out.dets.push_back(di);
+  }
+
+  return detected;
 }
 
 Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_timestamp_ns,
@@ -742,70 +815,7 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
     out.n_selected = 1;
     out.max_score = 1.0f;
   } else {
-  // 2) letterbox + blob（与 HW26 的 TensorRT 路径完全同构）
-  LetterboxInfo info;
-  cv::Mat lb = buff_algo::letterbox_image(bgr, info, I.in_size);
-  cv::Mat blob =
-      cv::dnn::blobFromImage(lb, 1.0 / 255.0, I.in_size, cv::Scalar(), true, false, CV_32F);
-    g_stage_acc.mark(1);
-
-  // 3) OpenVINO 推理（替代 TensorRT）
-  ov::Tensor in_t(I.compiled.input().get_element_type(), I.compiled.input().get_shape(),
-                  blob.ptr<float>());
-  I.req.set_input_tensor(in_t);
-  I.req.infer();
-    g_stage_acc.mark(2);
-  const float *raw = I.req.get_output_tensor(0).data<const float>();
-  // 全候选最大类别分（不做阈值），用于判断"离检出差多远"
-  {
-    float mx = 0.0f;
-    for (int64_t i = 0; i < kCandidateCount; ++i) {
-      const float *row = raw + i * kOutputColumns + 4;
-      for (int c = 0; c < 4; ++c) {
-        if (row[c] > mx) mx = row[c];
-      }
-    }
-    out.max_score = mx;
-  }
-  const auto detected =
-      buff_algo::decode_detections(raw, kCandidateCount, kOutputColumns, info, I.dcfg);
-    g_stage_acc.mark(3);
-  out.n_det = static_cast<int>(detected.size());
-  // 可视化：把【每一个】检出的关键点都收进来（大符会有 2 组），
-  // 而不是只画 detected[0] —— 后者是置信度最高的那个，两片靶标会互相超过，
-  // 于是画出来的点在两片之间来回跳。这不影响 tracker 的输入。
-  for (const auto &d : detected) {
-    std::vector<cv::Point2f> one;
-    one.reserve(d.keypoints.size());
-    for (const auto &q : d.keypoints) one.emplace_back(q.x(), q.y());
-    out.det_kpts.push_back(std::move(one));
-    // 青环（旋转中心 R）：HW26 的 keypoints[8] 就是模型【直接输出】的转盘中心
-    // 换回 HW26 后恢复这里，青环与"两片夹角"等几何判断才有依据。
-    if (!detected.empty() && detected[0].keypoints.size() > 8) {
-      const auto &rc = detected[0].keypoints[8];
-      I.last_rcenter = cv::Point2f(rc.x(), rc.y());
-      I.have_rcenter = true;
-    }
-  }
-  if (!detected.empty()) {
-    for (const auto &q : detected[0].keypoints)
-      I.last_kpt.push_back(cv::Point2f(q.x(), q.y()));
-  }
-  out.dets.reserve(detected.size());
-  for (const auto &d : detected) {
-    DetInfo di;
-    di.color = d.detection.color;
-    di.label = d.detection.label;
-    di.confidence = d.detection.confidence;
-    di.cx = d.detection.t.x();
-    di.cy = d.detection.t.y();
-    // 原始 9 个关键点展平成 18 个数（图像像素，letterbox 已还原）
-    for (int k = 0; k < 9; ++k) {
-      di.kpts[2 * k] = d.keypoints[k].x();
-      di.kpts[2 * k + 1] = d.keypoints[k].y();
-    }
-    out.dets.push_back(di);
-  }
+  const auto detected = Impl::detect_blades(I, bgr, out);
 
   // 4) 目标筛选
   std::vector<BuffDetection> dets;
