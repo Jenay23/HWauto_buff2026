@@ -471,16 +471,6 @@ cd /home/jno/Documents/GitHub/Vision_Buff_study/HWauto_buff2026/bridge
 
 退出码 **0 = 有检出**（继续）；**4 = 无检出**（模型不泛化到模拟器渲染的符 → 见 §6.5）。
 
-### 3.4 `--selftest-aim`（合成关键点，验算瞄准数学）
-
-> ⚠️ **只能在 `mode: 1`（小符）下用。** 它每例喂 200 帧但**叶片相位是固定的**，
-> 而大符的 tracker 要靠 RANSAC 正弦拟合才能进 TRACKING，相位不动就永远收敛不了
-> → 一例都过不了（实测 `mode: 2` 下 0/36，`mode: 1` 下 36/36）。
-> 程序在 `mode: 2` 时会打印告警。
->
-> 2026-10-12 复测：删掉 `detect_only`（它原本会把这条路径的 PnP 关掉）之后，
-> `--selftest-aim --mode 1` 恢复 **36/36 个用例误差 ≤ 2°**。
-
 ### 3.5 `record.sh`：把一次运行完整录到 `logs/`
 
 ```bash
@@ -496,7 +486,6 @@ grep 'st=1'     logs/*.log
 ```
 
 > ⚠️ `hw26_bridge_log.csv` 是**每次运行都截断重写**的。要保留逐帧数据就拿走或改 `log_path`。
-> （`--selftest-aim` 已不再写这个文件 —— 它以前会用自己的合成数据把上一次实测的逐帧日志抹掉。）
 
 ### 3.6 离线预测器对比（只用日志，不需要模拟器）
 
@@ -520,7 +509,6 @@ python3 tools/predictor_compare.py logs/*.log
 | `--config <path>` | 配置路径（默认 `config/bridge.yaml`） |
 | `--capture <png>` | 抓一帧存盘（配合 `--selftest`） |
 | `--selftest <png>` | 对一张图跑检测，退出码 0=有检出 / 4=无检出 |
-| `--selftest-aim` | 合成关键点验算瞄准（**仅小符**） |
 | `--selftest-center` | 合成"一片在半径 0.7 圆上"的位置序列，验证圆心拟合（§1.10） |
 | `--replay <mp4>` | 回放视频；可配 `--closed-loop` |
 | `--frames N` | 最多处理 N 帧 |
@@ -895,6 +883,7 @@ bridge/
 
 | 日期 | 变更 |
 |---|---|
+| 2026-10-16 | 删掉**已失效的 `--selftest-aim`**（连同 `run_selftest_aim` 约 110 行、CLI 分支与文档）：它喂的是**静止相位**，而瞄准段的条件后来改成"tracker 必须 TRACKING/ready"，36 个用例一个都不跑、恒报 0/36 —— 看着像守门员其实没有信号。重构的守门员改用 **`--replay` + CSV 对照**（同一 `buff.mp4` 跑两遍，除 `latency_ms` 外 37 列逐字节一致） |
 | 2026-10-16 | 删掉 `tools/` 里 11 个**一次性分析脚本**（`anomaly_scan` / `badwin_probe` / `badwin_seq` / `badwin_after` / `heal_seq` / `stuck_scan` / `dlt_seq` / `fire_interval` / `hit_multi` / `true_delta` / `true_delta_runs`）：日志路径写死在源码里，只对某一次运行有意义；要复现从 `6bc6b01` 之前的历史取 |
 | 2026-10-16 | **`bridge/prune`：死代码清理 5 步**（本分支）—— Part 1/5 删 EKF(mode 2)；Part 2/5 删 AR(modes 1/4/5)；Part 3+4/5 删 modes 0/3/6(csine / free / table+coast)；Part 5/5 删弦相位 + **全部绘制**。`local_tracker.cpp` 从 ~800 行降到 ~300 行，`local_model` 现在只有 7 一条实现；经查 `aim_local_only` **不是**死代码，保留（`414e858` / `d6efe46` / `56c916f` / `5833d1e`） |
 | 2026-10-16 | 清理 `tools/` 里 7 个死路脚本（`aim_accuracy*.py` / `aim_sample.py` / `aim_uv.py` / `fly_sensitivity.py` / `lead_sweep.py` / `ts_overlap.py`），本文件 §8 同步（`84dda5a`） |

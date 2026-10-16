@@ -70,118 +70,6 @@ struct BridgeConfig {
 };
 
 
-// ---- 合成自检：用已知的合成符验证"检测->PnP->瞄准->云台角"整条链的符号 ----
-// 造一个符：车体系下 符心 C、面法向 n、扇叶在面内绕 n 转。把扇叶四角按
-// 模拟器的投影模型算成像素喂进管道，再和解析解比较。
-int run_selftest_aim(const BridgeConfig &bc) {
-  using Eigen::Vector3f;
-  using Eigen::Matrix3f;
-  const auto Rcg = [](double yaw, double pitch, double roll) {
-    return Eigen::AngleAxisf(static_cast<float>(yaw), Vector3f::UnitZ()).toRotationMatrix() *
-           Eigen::AngleAxisf(static_cast<float>(pitch), Vector3f::UnitY()).toRotationMatrix() *
-           Eigen::AngleAxisf(static_cast<float>(roll), Vector3f::UnitX()).toRotationMatrix();
-  };
-  // 云台系 -> 相机系：必须与管道内部用同一个来源（hw26_pipeline.hpp 的
-  // gimbal_to_camera / R_camera2gimbal）。这里**故意不再手写公式**：
-  // 若自检与管道用了不同的相机约定，自检会立刻报超差，正是我们要的交叉检查。
-  const auto g2c = [](const Vector3f &g) { return hw26_bridge::gimbal_to_camera(g); };
-  const double fx = bc.algo.camera_matrix.at<double>(0, 0);
-  const double fy = bc.algo.camera_matrix.at<double>(1, 1);
-  const double ccx = bc.algo.camera_matrix.at<double>(0, 2);
-  const double ccy = bc.algo.camera_matrix.at<double>(1, 2);
-  const float h = static_cast<float>(bc.algo.blade_half_size);
-  const double pitch_off = bc.algo.pitch_offset_deg * M_PI / 180.0;  // = -0.349
-  const double v0 = bc.algo.bullet_speed, gg = bc.algo.gravity;
-  const Vector3f tm(static_cast<float>(bc.algo.muzzle_offset[0]),
-                    static_cast<float>(bc.algo.muzzle_offset[1]),
-                    static_cast<float>(bc.algo.muzzle_offset[2]));
-
-  // 符：符心在车体系，面法向朝机器人
-  const Vector3f C(7.0f, 2.5f, 1.20f);
-  Vector3f n(-7.0f, -2.5f, 0.6f);
-  n.normalize();
-  Vector3f u0 = Vector3f::UnitZ() - n * n.z();
-  u0.normalize();
-  const Vector3f u1 = n.cross(u0);
-
-  std::printf("\n[aim-selftest] 符心=(%.2f,%.2f,%.2f) 面法向=(%.2f,%.2f,%.2f) h=%.3f\n",
-              C.x(), C.y(), C.z(), n.x(), n.y(), n.z(), h);
-  std::printf("  期望: yaw 与解析解一致; pitch_cmd = 0.349 - 弹道仰角\n\n");
-  std::printf("%-22s %-24s %10s %10s %9s %9s %8s\n", "云台(yaw,pitch)deg", "扇叶相位deg",
-              "期望yaw", "原始yaw", "期望pitch", "原始pitch", "误差deg");
-  int bad = 0, tot = 0;
-  for (double gy : {-20.0, 0.0, 20.0}) {
-    for (double gp : {-10.0, 0.0, 10.0}) {
-      for (double phase : {0.0, 90.0, 200.0, 300.0}) {
-        const double gyaw = gy * M_PI / 180.0, gpit = gp * M_PI / 180.0;
-        const Matrix3f Rc = Rcg(gyaw, gpit, 0.0);
-        // 扇叶方向：绕 n 转 phase
-        const double ph = phase * M_PI / 180.0;
-        Vector3f zr = std::cos(ph) * u0 + std::sin(ph) * u1;
-        zr.normalize();
-        const Vector3f yr = zr.cross(n);
-        Matrix3f Rr;
-        Rr.col(0) = n; Rr.col(1) = yr; Rr.col(2) = zr;
-        const Vector3f tb = C + 0.7f * zr;   // 扇叶中心（车体系）
-        // 四角（相对扇叶中心），顺序 上/左/下/右
-        const Vector3f obj[4] = {{0, 0, h}, {0, h, 0}, {0, 0, -h}, {0, -h, 0}};
-        std::vector<cv::Point2f> kpt;
-        bool ok = true;
-        for (int i = 0; i < 4; ++i) {
-          const Vector3f pc = tb + Rr * obj[i];
-          const Vector3f pg = Rc.transpose() * pc;
-          const Vector3f q = g2c(pg);
-          if (q.z() < 0.2f) { ok = false; break; }
-          kpt.emplace_back(static_cast<float>(ccx + fx * q.x() / q.z()),
-                           static_cast<float>(ccy + fy * q.y() / q.z()));
-        }
-        if (!ok) continue;
-        // kpt[4]=扇叶中心, kpt[5]=臂上一点（用符心方向外推，够用）
-        {
-          const Vector3f q4 = g2c(Rc.transpose() * tb);
-          const Vector3f qc = g2c(Rc.transpose() * C);
-          kpt.emplace_back(static_cast<float>(ccx + fx * q4.x() / q4.z()),
-                           static_cast<float>(ccy + fy * q4.y() / q4.z()));
-          kpt.emplace_back(static_cast<float>(ccx + fx * qc.x() / qc.z()),
-                           static_cast<float>(ccy + fy * qc.y() / qc.z()));
-        }
-        // 期望
-        const Vector3f pm = tb - Rc * tm;
-        const double exp_yaw = std::atan2(static_cast<double>(pm.y()), static_cast<double>(pm.x()));
-        const double d = std::hypot(static_cast<double>(pm.x()), static_cast<double>(pm.y()));
-        const double hh = static_cast<double>(pm.z());
-        const double v2 = v0 * v0;
-        const double disc = v2 * v2 - gg * (gg * d * d + 2.0 * hh * v2);
-        const double elev = std::atan((v2 - std::sqrt(std::max(0.0, disc))) / (gg * d));
-        const double exp_pitch = -(elev + pitch_off);
-
-        // 喂若干帧让它进 TRACKING
-        hw26_bridge::Pipeline pipe(bc.algo);
-        pipe.set_external_kpts(kpt);
-        cv::Mat img(1080, 1440, CV_8UC3, cv::Scalar(0, 0, 0));
-        hw26_bridge::Output out;
-        for (int f = 0; f < 200; ++f) {
-          out = pipe.process(img.data, 1440, 1080, static_cast<int64_t>(f) * 33333333LL,
-                             static_cast<float>(gyaw), static_cast<float>(gpit), 0.f);
-        }
-        // 用【原始弹道解】验证数学与符号（不受护栏限速影响）
-        const double dy = (out.fire_aim_yaw - exp_yaw) * 180.0 / M_PI;
-        const double dp = (out.fire_aim_pitch - exp_pitch) * 180.0 / M_PI;
-        const double err = std::hypot(dy, dp);
-        ++tot;
-        if (err > 2.0) ++bad;
-        std::printf("%-22s %-24.0f %9.2f° %9.2f° %8.2f° %8.2f° %7.2f %s\n",
-                    (std::to_string(static_cast<int>(gy)) + "," +
-                     std::to_string(static_cast<int>(gp))).c_str(), phase,
-                    exp_yaw * 180 / M_PI, out.fire_aim_yaw * 180 / M_PI, exp_pitch * 180 / M_PI,
-                    out.fire_aim_pitch * 180 / M_PI, err, err > 2.0 ? "  <== 超差" : "");
-      }
-    }
-  }
-  std::printf("\n[aim-selftest] %d/%d 个用例误差 <= 2deg\n", tot - bad, tot);
-  return bad == 0 ? 0 : 5;
-}
-
 // ---- 圆拟合自检（--selftest-center）----
 // 合成"一片靶标在半径 0.7 的圆上"的位置序列，验证 fit_fixed_radius_center：
 //   1) 正常：40 帧跨 ~120°、5mm/1cm 噪声 -> 圆心误差应 ~mm~cm
@@ -909,7 +797,6 @@ int main(int argc, char **argv) {
   const std::string capture = arg_value(argc, argv, "--capture", "");
   const std::string selftest = arg_value(argc, argv, "--selftest", "");
   const std::string replay = arg_value(argc, argv, "--replay", "");
-  const bool selftest_aim = has_flag(argc, argv, "--selftest-aim");
   const bool selftest_center = has_flag(argc, argv, "--selftest-center");
   const int max_frames = std::stoi(arg_value(argc, argv, "--frames", "0"));
   const bool no_fire = has_flag(argc, argv, "--no-fire");
@@ -992,23 +879,6 @@ int main(int argc, char **argv) {
   }
 
   if (selftest_center) return run_selftest_center(bc);
-
-  if (selftest_aim) {
-    if (bc.algo.buff_mode == 2) {
-      std::cout
-          << "[bridge] WARNING: --selftest-aim injects a STATIC blade phase, so the big-rune\n"
-             "         tracker can never converge its RANSAC sine fit and will never aim.\n"
-             "         Use mode: 1 (small rune) - it exercises exactly the same aim maths.\n";
-    }
-    // 【不要写逐帧 CSV】自检喂的是合成关键点，每个用例都会新建 Pipeline 并按 log_path
-    // 截断重写文件。若沿用真实的 log_path，跑一次自检就会把上一次实测的逐帧日志抹掉。
-    BridgeConfig selftest_cfg = bc;
-    selftest_cfg.algo.log_path.clear();
-    // 自检注入的是【静止相位】，本地 tracker 不会 ready；必须允许回退 HW26 predictor
-    // 才能验算瞄准数学（与 aim_local_only 的现场策略无关）。
-    selftest_cfg.algo.aim_local_only = false;
-    return run_selftest_aim(selftest_cfg);
-  }
 
   // ---- replay：视频回放，不需要模拟器 ----
   if (!replay.empty())

@@ -723,7 +723,7 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
   };
 
   {
-  // 合成自检（--selftest-aim）注入的关键点。
+  // 外部注入的关键点（调试钩子 set_external_kpts；仓库内当前没有调用点）。
   if (I.ext_kpts.size() >= 6) {
     const cv::Point2f &pt = I.ext_kpts[0];
     const cv::Point2f &pl = I.ext_kpts[1];
