@@ -52,6 +52,7 @@ set(HW26_SOURCES
 
 add_executable(hw26_sim_bridge
   src/main.cpp
+  src/config_io.cpp
   src/hw26_pipeline.cpp
   src/local_tracker.cpp
   ${HW26_SOURCES}
