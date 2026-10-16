@@ -1336,7 +1336,6 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       //   => theta = atan2(z - C.z, C.y - y)
       //   所以 predict() 的 theta_A(t+lead) 代回同一公式，就恒等于橙点 lead 秒后的位置。
       double theta_feed = static_cast<double>(obs.roll);   // 兜底：中心或板心无效时用原 roll
-      bool theta_from_chord = false;
       bool theta_fused = false;
       bool theta_roll = false;
       // ★★★ 两片 roll 融合 + 【统一约定】（默认开）★★★
@@ -1364,40 +1363,7 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
         }
         // 单片：theta_feed 已经是 obs.roll，属于同一 Buff roll 约定，直接用。
       }
-      // ★★★ 弦相位（创新，圆心无关）★★★
-      //   两片点亮的靶标刚性固连在同一转盘上，所以它们的连线向量也随转盘【刚体旋转】：
-      //       chord = p_B - p_A ∝ (sin η, cos η),  η = θ_A + Δ/2,  Δ = k·72°
-      //   => χ = atan2(chord_z, chord_y) = π/2 - η  =>  η = π/2 - χ
-      //   => 两个候选 θ = η ∓ Δ/2（它们都是真实点亮的靶标，任取其一都能打）。
-      //   好处：① 完全不需要圆心 C（绕开 §1.10 那套固定半径圆拟合及其误差）；
-      //        ② 两片位置做差，公共误差（距离/尺度偏差）自动抵消；
-      //        ③ 身份换片只会让候选整体平移 Δ，用"离上一帧最近"即可稳定消歧，
-      //           不会再像 PnP roll 那样每帧跳 180°/72°。
-      //   Δ 由弦长自身给出（对朝向免疫）：chord = 2R sin(Δ/2)。
-      if (!theta_roll && !theta_fused && I.cfg.chord_phase && is_face && have_t1 &&
-          out.meas_a_valid) {
-        const double dy = static_cast<double>(t1.y() - t0.y());
-        const double dz = static_cast<double>(t1.z() - t0.z());
-        const double chord_len = std::hypot(dy, dz);
-        const double step = 2.0 * M_PI / 5.0;
-        const double s = std::min(1.0, chord_len / (2.0 * static_cast<double>(r)));
-        int kk = static_cast<int>(std::lround(2.0 * std::asin(s) / step));
-        if (kk < 1) kk = 1;
-        if (kk > 2) kk = 2;
-        const double delta = kk * step;
-        const double chord_exp = 2.0 * static_cast<double>(r) * std::sin(0.5 * delta);
-        if (chord_len > 0.15 && std::abs(chord_len - chord_exp) < 0.18) {
-          const double eta = 0.5 * M_PI - std::atan2(dz, dy);
-          const double c1 = wrap_pi(eta - 0.5 * delta);
-          const double c2 = wrap_pi(eta + 0.5 * delta);
-          const double ref = (I.have_last_local_theta && I.local_trk.n() > 0)
-                                 ? I.last_local_theta
-                                 : static_cast<double>(obs.roll);
-          theta_feed = (std::abs(wrap_pi(c2 - ref)) < std::abs(wrap_pi(c1 - ref))) ? c2 : c1;
-          theta_from_chord = true;
-        }
-      }
-      if (!theta_roll && !theta_fused && !theta_from_chord && out.meas_a_valid) {
+      if (!theta_roll && !theta_fused && out.meas_a_valid) {
         // 单片兜底：还是用圆心（老路径），保证单片也能工作
         const Eigen::Vector3f p_face = I.R_chassis_face.transpose() * out.meas_a_ch;
         const double dy = static_cast<double>(I.center_face.y() - p_face.y());
@@ -1410,7 +1376,7 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
         I.last_local_theta = theta_feed;
         I.have_last_local_theta = true;
         out.local_theta = theta_feed;
-        out.local_chord = theta_roll ? 2 : (theta_from_chord ? 1 : 0);
+        out.local_chord = theta_roll ? 2 : 0;   // bridge/prune：弦相位已删，只剩 0/2
         I.local_trk.push(t_rel, theta_feed);
       }
       out.local_n = I.local_trk.n();
@@ -1737,91 +1703,6 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
     }
   }
 
-  if (I.cfg.visualize) {
-    // 车体系 -> 像素（可视化块自己的助手；上面 aim 段那个 project_px 不在此作用域）
-    auto proj_ch = [&](const Eigen::Vector3f &p_ch, int *px, int *py) -> bool {
-      return project_cam(gimbal_to_cam(R_cg.transpose() * p_ch), I.cfg.camera_matrix, px, py);
-    };
-    out.debug = bgr.clone();
-    const int cx = static_cast<int>(std::lround(I.cfg.camera_matrix.at<double>(0, 2)));
-    const int cy = static_cast<int>(std::lround(I.cfg.camera_matrix.at<double>(1, 2)));
-
-    // ---- 紫点：未来打击点（预测命中点）----
-    // 颜色按用户要求由绿改紫（BGR 240,32,160 = RGB 160,32,240）；
-    // 按用户要求改成【空心】且直径更大：r=14（直径 28，原 r=8 实心）、线宽 3。
-    // 空心时判读依据是【圆环中心】。
-    // 注意：本文件其余注释与日志里仍把它叫"绿点"，指的是同一个点。
-    if (out.green_px_x > 0) {
-      cv::circle(out.debug, {out.green_px_x, out.green_px_y}, 14, cv::Scalar(240, 32, 160), 3,
-                 cv::LINE_AA);
-    }
-    // ---- 蓝点（枪管射线 ∩ 符平面）已按用户要求【取消绘制】----
-    // 数据仍然计算（out.blue_px_* 保留，供日志与调试用），只是不画。
-
-    // ---- 把检测到的东西画出来（让"在检测什么"可见）----
-    // 多个检出各自一组颜色：第 1 组黄（与原行为一致），第 2 组品红，第 3 组起循环。
-    // 以前只画 detected[0]，大符时会在两片靶标之间来回跳。
-    {
-      // 【一组一个颜色：组内六个点同色，两组之间颜色不同】
-      //   组 1 = 黄，组 2 = 品红。半径统一（不再靠大小暗示身份），组号另用数字标出。
-      static const cv::Scalar kGroupColor[2] = {
-          cv::Scalar(0, 255, 255),   // 组 1：黄
-          cv::Scalar(255, 0, 255),   // 组 2：品红
-      };
-      const std::size_t kDrawGroups = std::min<std::size_t>(2, out.det_kpts.size());
-      for (std::size_t g = 0; g < kDrawGroups; ++g) {
-        const cv::Scalar &col = kGroupColor[g];
-        // ★ 按用户要求：每组只画【1 个点】= 第 9 个（index 8，模型直接输出的旋转中心）
-      if (!out.det_kpts[g].empty()) {
-        const cv::Point2f &d = out.det_kpts[g].back();
-        cv::circle(out.debug, {static_cast<int>(d.x), static_cast<int>(d.y)}, 6, col,
-                   cv::FILLED, cv::LINE_AA);
-      }
-        // 编号：默认 1 = A（相位靠前 = 先打的那片）；num_reverse=1 时两组编号对调。
-        if (!out.det_kpts[g].empty()) {
-          const cv::Point2f &p0 = out.det_kpts[g].back();
-          const std::size_t shown = (I.cfg.num_reverse != 0) ? (kDrawGroups - g) : (g + 1);
-          char tag[8];
-          std::snprintf(tag, sizeof(tag), "%zu", shown);
-          cv::putText(out.debug, tag, {static_cast<int>(p0.x) + 6, static_cast<int>(p0.y) - 6},
-                      cv::FONT_HERSHEY_SIMPLEX, 0.7, col, 2, cv::LINE_AA);
-        }
-      }
-    }
-    if (I.have_rcenter) {
-      cv::circle(out.debug, {static_cast<int>(I.last_rcenter.x), static_cast<int>(I.last_rcenter.y)},
-                 10, cv::Scalar(255, 255, 0), 2, cv::LINE_AA);  // 中心 R（青）
-    }
-
-    // ---- 两片各自实测的板心（亮绿/暗绿）----
-    //   判据：两点应落在同一个转盘的轨道上，角间距 72° 或 144°；
-    //   它们各自对应一片点亮的靶标（关键点组 1 / 组 2 也应该各落在一片上面）。
-    if (I.face_ready) {
-      // 两片各自实测的板心
-      int ax = -1, ay = -1, bx = -1, by = -1;
-      const bool okA = out.meas_a_valid && proj_ch(out.meas_a_ch, &ax, &ay);
-      const bool okB = out.meas_b_valid && proj_ch(out.meas_b_ch, &bx, &by);
-      // 两组各自的【三维板心重投影】，一色一组：
-      //   组 1（六个黄点）的板心 -> 橙；组 2（六个品红点）的板心 -> 蓝。
-      //   （蓝用 (255,80,0)：纯蓝 (255,0,0) 已被"枪管射线∩符平面"的蓝点占用，略作区分。）
-      const cv::Scalar kCenterA(0, 165, 255);   // 橙 = 组1 的板心
-      const cv::Scalar kCenterB(255, 80, 0);    // 蓝 = 组2 的板心
-      if (okA) {
-        cv::circle(out.debug, {ax, ay}, 6, kCenterA, cv::FILLED, cv::LINE_AA);
-        // 组号写在板心点旁：应与第 1 组关键点上的"1"落在同一片靶标上
-        cv::putText(out.debug, "1", {ax + 8, ay + 16}, cv::FONT_HERSHEY_SIMPLEX, 0.7,
-                    kCenterA, 2, cv::LINE_AA);
-      }
-      if (okB) {
-        cv::circle(out.debug, {bx, by}, 6, kCenterB, cv::FILLED, cv::LINE_AA);
-        // 暗绿点 = 组 2（B），应与品红关键点组上的"2"落在同一片靶标上
-        cv::putText(out.debug, "2", {bx + 8, by + 16}, cv::FONT_HERSHEY_SIMPLEX, 0.7,
-                    kCenterB, 2, cv::LINE_AA);
-      }
-    }
-    // ★ 按用户要求：HUD 的 5 行文字全部去掉（省下最贵的 putText）
-
-  }
 
   g_stage_acc.mark(4);
   const auto t_end = std::chrono::steady_clock::now();
