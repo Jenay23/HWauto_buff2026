@@ -250,7 +250,9 @@ visualize: 1
 # Log every frame (not every 30th) so the CSV can be joined 1:1 with the
 # telemetry recorder's one-row-per-image-frame CSV on sim_t_ns.
 visualize_every: 1             # 显示节流：1=每帧都显示（面板 60Hz 时不要调大 ✗，否则画面掉到 1/N）
-console_every: 10             # 屏幕打印节流（每 N 帧一行）；CSV 日志不受影响，仍是每帧 ✓
+console_every: 30             # 屏幕打印节流（每 N 帧一组）；CSV 仍是每帧一行，不受影响 ✓
+# 终端 I/O 会直接吃帧率：10 帧一组时约 22 行/秒，30 帧一组约 7 行/秒。
+# 想看细节的 [ab]/[dir] 诊断写 logs/diag.log，退出时终端只打一行汇总。
 log_every: 1
 log_path: "hw26_bridge_log.csv"
 

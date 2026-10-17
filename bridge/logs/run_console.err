@@ -1,0 +1,9 @@
+[hw26] 警告: 设备 GPU 编译失败，自动回退 CPU: Exception from src/inference/src/cpp/core.cpp:104:
+Check '!m_device_map.empty()' failed at src/plugins/intel_gpu/src/plugin/plugin.cpp:419:
+[GPU] Can't get PERFORMANCE_HINT property as no supported devices found or an error happened during devices query.
+[GPU] Please check OpenVINO documentation for GPU drivers setup guide.
+
+
+
+[diag] locks=0  ab_ambiguous=0  ab_swap=0  -> logs/diag.log
+  耗时 6.61 s

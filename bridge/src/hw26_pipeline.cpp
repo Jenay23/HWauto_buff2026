@@ -449,6 +449,9 @@ struct Pipeline::Impl {
   /// 锁定期到什么时候（图像时间轴）。判准一次后到点前不再重新判，
   /// 否则起始阶段 tracker 窗口短、符号来回翻 -> 橙/蓝跳变。
   double dir_lock_until_t = -1e18;
+  // ---- 诊断（只写文件，不刷终端）：logs/diag.log ----
+  std::ofstream diag;
+  long long n_diag_lock = 0, n_diag_ab = 0, n_diag_ab_swap = 0;
   double last_latency_ms = 0.0;
   std::ofstream log;
   cv::FileStorage tracker_fs;
@@ -517,6 +520,8 @@ Pipeline::Pipeline(const Config &cfg) : impl_(new Impl(cfg)) {
   I.local_trk.set_coast_s(cfg.local_coast_s);
   I.predictor = std::make_unique<buff_algo::BuffPredictor>(I.tracker_fs["buff_tracker"]);
 
+  // 诊断日志固定写到 logs/diag.log（logs/*.log 已被 .gitignore 忽略），终端保持干净。
+  I.diag.open("logs/diag.log", std::ios::out | std::ios::trunc);
   if (!cfg.log_path.empty()) {
     I.log.open(cfg.log_path, std::ios::out | std::ios::trunc);
     if (I.log) {
@@ -539,7 +544,13 @@ Pipeline::Pipeline(const Config &cfg) : impl_(new Impl(cfg)) {
   }
 }
 
-Pipeline::~Pipeline() = default;
+Pipeline::~Pipeline() {
+  auto &I = *impl_;
+  if (I.diag) I.diag.flush();
+  std::fprintf(stderr,
+               "[diag] locks=%lld  ab_ambiguous=%lld  ab_swap=%lld  -> logs/diag.log\n",
+               I.n_diag_lock, I.n_diag_ab, I.n_diag_ab_swap);
+}
 
 const Config &Pipeline::config() const { return impl_->cfg; }
 
@@ -1270,10 +1281,14 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
           I.local_trk.span_deg() >= 45.0) {
         I.dir_sgn = (I.local_trk.sgn() >= 0.0) ? 1.0 : -1.0;
         I.dir_lock_until_t = t_rel + I.cfg.dir_lock_s;
-        // 诊断：锁存只在满足条件时发生一次，打一行让它可见（不影响任何逻辑）
-        std::printf("[dir] LOCK %+.0f  at t=%.2fs  until t=%.2fs (span=%.0fdeg)\n",
-                    I.dir_sgn, t_rel, I.dir_lock_until_t, I.local_trk.span_deg());
-        std::fflush(stdout);
+        // 诊断：锁存只在满足条件时发生一次，记到文件里（不影响任何逻辑）
+        ++I.n_diag_lock;
+        if (I.diag) {
+          I.diag << "[dir] LOCK " << (I.dir_sgn > 0 ? '+' : '-') << "1  at t=" << t_rel
+                 << "s  until t=" << I.dir_lock_until_t << "s  span=" << I.local_trk.span_deg()
+                 << "deg\n";
+          I.diag.flush();
+        }
       }
       const bool want_larger = (I.dir_sgn > 0.0);
       Buff A = obs;
@@ -1284,11 +1299,16 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       const bool a_is_larger = (roll_delta < 0.0);
       // 诊断：A/B 相位差小于 30deg 时打一行 —— 真两片（5 片制 72deg 间隔）不可能这么近，
       // 所以这类帧只可能是"同一个靶标的两个解"，此时 swap 与否是噪声。
-      if (std::abs(roll_delta) * 180.0 / M_PI < 30.0) {
-        std::printf("[ab] rdelta=%+.1fdeg want_larger=%d a_is_larger=%d swap=%d\n",
-                    roll_delta * 180.0 / M_PI, want_larger ? 1 : 0, a_is_larger ? 1 : 0,
-                    (a_is_larger != want_larger) ? 1 : 0);
-        std::fflush(stdout);
+      const double rdelta_deg = roll_delta * 180.0 / M_PI;
+      if (std::abs(rdelta_deg) < 30.0) {
+        ++I.n_diag_ab;
+        const bool swap = (a_is_larger != want_larger);
+        if (swap) ++I.n_diag_ab_swap;
+        if (I.diag) {
+          I.diag << "[ab] t=" << t_rel << " rdelta=" << rdelta_deg << "deg want_larger="
+                 << (want_larger ? 1 : 0) << " a_is_larger=" << (a_is_larger ? 1 : 0)
+                 << " swap=" << (swap ? 1 : 0) << "\n";
+        }
       }
       if (a_is_larger != want_larger) {
         std::swap(A, B);
