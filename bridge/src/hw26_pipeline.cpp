@@ -1305,9 +1305,10 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
         const bool swap = (a_is_larger != want_larger);
         if (swap) ++I.n_diag_ab_swap;
         if (I.diag) {
-          I.diag << "[ab] t=" << t_rel << " rdelta=" << rdelta_deg << "deg want_larger="
-                 << (want_larger ? 1 : 0) << " a_is_larger=" << (a_is_larger ? 1 : 0)
-                 << " swap=" << (swap ? 1 : 0) << "\n";
+          I.diag << "[ab] t=" << t_rel << " A_roll=" << A.roll << " B_roll=" << B.roll
+                 << " rdelta=" << rdelta_deg << "deg want_larger=" << (want_larger ? 1 : 0)
+                 << " a_is_larger=" << (a_is_larger ? 1 : 0) << " swap=" << (swap ? 1 : 0)
+                 << "\n";
         }
       }
       if (a_is_larger != want_larger) {
