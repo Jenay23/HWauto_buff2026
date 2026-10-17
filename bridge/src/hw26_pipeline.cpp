@@ -1270,6 +1270,10 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
           I.local_trk.span_deg() >= 45.0) {
         I.dir_sgn = (I.local_trk.sgn() >= 0.0) ? 1.0 : -1.0;
         I.dir_lock_until_t = t_rel + I.cfg.dir_lock_s;
+        // 诊断：锁存只在满足条件时发生一次，打一行让它可见（不影响任何逻辑）
+        std::printf("[dir] LOCK %+.0f  at t=%.2fs  until t=%.2fs (span=%.0fdeg)\n",
+                    I.dir_sgn, t_rel, I.dir_lock_until_t, I.local_trk.span_deg());
+        std::fflush(stdout);
       }
       const bool want_larger = (I.dir_sgn > 0.0);
       Buff A = obs;
@@ -1278,6 +1282,14 @@ Output Pipeline::process(const uint8_t *rgb, int width, int height, int64_t sim_
       const double roll_delta = wrap_pi(static_cast<double>(B.roll) - static_cast<double>(A.roll));
       // 当前 A=obs：roll_delta>0 表示 A 的相位更小。
       const bool a_is_larger = (roll_delta < 0.0);
+      // 诊断：A/B 相位差小于 30deg 时打一行 —— 真两片（5 片制 72deg 间隔）不可能这么近，
+      // 所以这类帧只可能是"同一个靶标的两个解"，此时 swap 与否是噪声。
+      if (std::abs(roll_delta) * 180.0 / M_PI < 30.0) {
+        std::printf("[ab] rdelta=%+.1fdeg want_larger=%d a_is_larger=%d swap=%d\n",
+                    roll_delta * 180.0 / M_PI, want_larger ? 1 : 0, a_is_larger ? 1 : 0,
+                    (a_is_larger != want_larger) ? 1 : 0);
+        std::fflush(stdout);
+      }
       if (a_is_larger != want_larger) {
         std::swap(A, B);
         pose0_is_a = false;
